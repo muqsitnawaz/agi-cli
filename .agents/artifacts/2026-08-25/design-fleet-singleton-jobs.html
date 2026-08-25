@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Two kinds of daemon job, and how the fleet picks who runs the shared one</title>
+<style>
+:root{--font-body:Inter,Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-display:Inter,Inter,system-ui,sans-serif;--font-mono:"JetBrains Mono","JetBrains Mono","SFMono-Regular",Consolas,monospace;}
+@page{margin:24px}
+:root{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;--content-width:980px;--page-padding:24px;--mobile-page-padding:16px;--hero-top:40px;--hero-bottom:28px;--section-spacing:36px;--figure-spacing:22px;--panel-padding:16px;--footer-spacing:64px;--print-margin:24px;--code:#0c0f0d;--code-text:#e7ece8;--radius:10px}
+@media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}}
+:root[data-theme="light"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}
+@media print{:root,:root[data-theme="light"],:root[data-theme="dark"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);line-height:1.6;-webkit-font-smoothing:antialiased;transition:background-color .15s ease,color .15s ease}main{width:100%;max-width:var(--content-width);min-width:0;margin:0 auto;padding:24px var(--page-padding) 80px}.document-header{display:flex;align-items:center;justify-content:flex-end;min-height:42px;border-bottom:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}.header-label{min-width:0;margin-right:auto;padding-right:12px;overflow-wrap:anywhere;color:var(--text);font-weight:650}.theme-toggle{display:inline-flex;flex:0 0 auto;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font:500 12px/1 var(--font-mono);cursor:pointer}.theme-toggle:hover{color:var(--accent);border-color:var(--accent)}.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.hero{padding:var(--hero-top) 0 var(--hero-bottom);border-bottom:1px solid var(--line)}.kicker{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-family:var(--font-mono);font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-weight:500}.kicker-part{color:var(--accent)}.kicker-separator{color:var(--muted);padding:0 2px}.status-badge{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn);font-family:var(--font-mono);font-size:10.5px;font-weight:650;letter-spacing:.1em;text-transform:uppercase;line-height:1}.status-badge.status-implementing,.status-badge.status-in-progress,.status-badge.status-review,.status-badge.status-done,.status-badge.status-complete{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}.hero h1{font-family:var(--font-display);font-size:clamp(30px,4vw,44px);line-height:1.1;margin:12px 0 14px;letter-spacing:-.01em}.summary{max-width:760px;color:var(--muted);font-size:17px;margin:0}.meta{display:grid;gap:14px;margin-top:20px}.facts-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.meta-block{display:grid;gap:8px}.meta-label{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}.meta-row{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}.chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 11px;color:var(--muted);font-family:var(--font-mono);font-size:11.5px;line-height:1.5}.chip-value{color:var(--text);overflow-wrap:anywhere}.chip-icon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;fill:currentColor;flex:0 0 auto}.chip-favicon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;border-radius:2px;object-fit:contain;flex:0 0 auto}.chip-value a{color:inherit;text-decoration:none}.chip-value a:hover{text-decoration:underline}.provenance-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.provenance-line a{color:var(--accent-alt);text-decoration:none}.provenance-line a:hover{text-decoration:underline}.provenance-part{color:var(--muted)}.meta-sep{margin:0 7px;opacity:.45}.toc{display:grid;gap:5px;margin:24px 0 8px;font-family:var(--font-mono);font-size:13px}.code-diff{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--code)}.code-diff-pre{margin:0;padding:10px 0;background:none;border:none;border-radius:0;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.55;color:var(--code-text)}.cd-line{display:block;white-space:pre;padding:0 14px}.cd-sign{display:inline-block;width:1.4ch;color:var(--muted);user-select:none}.cd-add{background:color-mix(in srgb,var(--accent) 15%,transparent)}.cd-add .cd-sign{color:var(--accent)}.cd-del{background:color-mix(in srgb,var(--danger) 15%,transparent)}.cd-del .cd-sign{color:var(--danger)}.cd-hunk,.cd-meta{color:var(--muted);opacity:.8}.code-diff>summary{list-style:none;cursor:pointer;padding:8px 14px;font-family:var(--font-mono);font-size:12px;color:var(--code-text);background:color-mix(in srgb,var(--code-text) 8%,var(--code));border-bottom:1px solid transparent;user-select:none}.code-diff[open]>summary{border-bottom-color:color-mix(in srgb,var(--code-text) 15%,transparent)}.code-diff>summary::-webkit-details-marker{display:none}.code-diff>summary::before{content:"\25B8";display:inline-block;margin-right:7px;color:color-mix(in srgb,var(--code-text) 55%,transparent);font-size:10px;transition:transform .12s ease}.code-diff[open]>summary::before{transform:rotate(90deg)}.checklist{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.checklist-head{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:10px}.checklist-items{list-style:none;margin:0;padding:0;display:grid;gap:7px}.cl-item{display:flex;align-items:baseline;gap:9px}.cl-box{flex:0 0 auto;font-family:var(--font-mono);font-size:.95em}.cl-done .cl-box{color:var(--accent)}.cl-todo .cl-box{color:var(--muted)}.cl-doing .cl-box{color:var(--warn)}.cl-done .cl-text{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}.toc a{color:var(--muted);text-decoration:none}.toc a:hover{color:var(--accent)}.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.toc-index{color:var(--accent);font-family:var(--font-mono);font-size:.9em}.artifact-body{min-width:0;padding-top:18px;counter-reset:section}h2{font-size:24px;margin:var(--section-spacing) 0 12px;line-height:1.2;letter-spacing:-.01em}.artifact-body>h2{counter-increment:section}.artifact-body>h2::before{content:counter(section,decimal-leading-zero);font-family:var(--font-mono);font-size:.62em;color:var(--accent);margin-right:10px;opacity:.85}h3{font-size:17px;margin:calc(var(--section-spacing) * .78) 0 10px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}p,li,dd,figcaption{overflow-wrap:anywhere}pre{background:var(--code);color:var(--code-text);padding:var(--panel-padding);border-radius:12px;overflow:auto;border:1px solid var(--line)}code{font-family:var(--font-mono);font-size:.88em;background:var(--surface-alt);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--accent-alt)}pre code{background:none;border:none;padding:0;color:inherit}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}blockquote{border-left:3px solid var(--accent);padding-left:var(--panel-padding);color:var(--muted);margin-left:0}img{display:block;max-width:100%;height:auto}svg{max-width:100%;height:auto}.artifact-body>p>img{margin:var(--figure-spacing) auto}.artifact-grid{display:grid;gap:var(--panel-padding);margin:var(--figure-spacing) 0}.artifact-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}.artifact-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.artifact-panel,.artifact-stat{min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.artifact-panel h3{margin:10px 0 8px;font-size:16px}.artifact-stat-value,.artifact-stat-label{display:block}.artifact-stat-value{color:var(--text);font-family:var(--font-display);font-size:24px;line-height:1.15}.artifact-stat-label{margin-top:6px;color:var(--muted);font-size:13px}.artifact-tag{display:inline-block;--tag-color:var(--muted);background:color-mix(in srgb,var(--tag-color) 12%,transparent);border:1px solid color-mix(in srgb,var(--tag-color) 30%,transparent);border-radius:6px;padding:2px 8px;color:var(--tag-color);font-family:var(--font-mono);font-size:11px;font-weight:600;text-transform:uppercase}.artifact-tag-accent{--tag-color:var(--accent)}.artifact-callout{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;background:var(--surface-alt);padding:var(--panel-padding)}.artifact-callout-warn{border-left-color:var(--warn)}.artifact-callout-danger{border-left-color:var(--danger)}.artifact-callout strong{color:var(--text)}.artifact-figure{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding);overflow-x:auto}.artifact-figure>img,.artifact-image{width:auto;max-width:100%;height:auto;margin:0 auto}.artifact-figure-diagram{background:#0e120f;border-color:#26302a}.artifact-diagram{display:block;width:100%;height:auto;margin:0 auto}.artifact-figure-tall{width:100%;max-width:394px;margin-left:auto;margin-right:auto}.artifact-figure figcaption{margin-top:12px;color:var(--muted);font-family:var(--font-mono);font-size:12px;text-align:center}.artifact-figure.artifact-figure-diagram figcaption{color:#8b938c}.artifact-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:12px 0;color:var(--muted);font-family:var(--font-mono);font-size:11.5px}.artifact-behavior{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;display:grid;grid-template-columns:1fr 1fr}.artifact-behavior-panel{padding:var(--panel-padding);background:var(--surface)}.artifact-behavior-panel+.artifact-behavior-panel{border-left:1px solid var(--line)}.artifact-behavior-panel::before{display:block;font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:500;margin-bottom:8px;content:""}.artifact-behavior-panel[data-state="current"]::before{content:"Current"}.artifact-behavior-panel[data-state="proposed"]{background:color-mix(in srgb,var(--accent) 6%,var(--surface))}.artifact-behavior-panel[data-state="proposed"]::before{content:"Proposed";color:var(--accent)}.document-footer{margin-top:var(--footer-spacing);padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}
+@media(max-width:720px){main{padding:32px var(--mobile-page-padding) 64px}.artifact-grid-2,.artifact-grid-3{grid-template-columns:1fr}.artifact-figure{padding:min(12px,var(--panel-padding))}.artifact-figure-wide .artifact-diagram{min-width:640px}.artifact-behavior{grid-template-columns:1fr}.artifact-behavior-panel+.artifact-behavior-panel{border-left:none;border-top:1px solid var(--line)}table{display:block;max-width:100%;overflow-x:auto}th,td{min-width:140px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}}
+@media print{body{transition:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}.toc,.theme-toggle{display:none}.document-header-empty{display:none}main{max-width:none;padding:0}:root[data-pdf-layout="poster"] main{max-width:var(--content-width);margin:0 auto;padding:var(--print-margin)}.chip{background:var(--surface)}.chip-value{color:var(--text)}.provenance-line,.provenance-line a,.facts-line{color:var(--text)}.status-badge{color:var(--text);border-color:var(--line)}h2,h3{break-after:avoid-page}.artifact-figure,.artifact-grid,.artifact-panel,.artifact-stat,.artifact-callout,.artifact-behavior,pre,table,blockquote,.meta{break-inside:avoid}.artifact-figure-wide .artifact-diagram{min-width:0}.artifact-figure-tall{max-width:330px}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--text);text-decoration:underline}}
+</style>
+</head>
+<body>
+<main>
+<header class="document-header"><div class="header-label">AGI CLI · fleet singleton jobs</div><button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false" title="Toggle color theme"><span aria-hidden="true">&#9680;</span> theme</button></header>
+<section class="hero">
+<div class="kicker"><span class="kicker-part">agents-cli</span><span class="kicker-separator" aria-hidden="true">&middot;</span><span class="kicker-part">plan</span><span class="status-badge status-draft">draft</span></div>
+<h1>Two kinds of daemon job, and how the fleet picks who runs the shared one</h1>
+<p class="summary">Usage is refreshed by every device independently — 88 provider calls a minute where 8 would do. The daemon needs two job classes, and the shared one needs a lease held by a device chosen for stability, not by whoever asks first.</p>
+<div class="meta" aria-label="Artifact metadata"><p class="facts-line">account-state-service.ts is documented device-local: every daemon refreshes usage every 60s<span class="meta-sep" aria-hidden="true">·</span>withRefreshLease locks under getCacheDir() — same-device, cross-process only; nothing spans the fleet<span class="meta-sep" aria-hidden="true">·</span>11 devices × 8 accounts = 88 provider refreshes/minute where 8 would do<span class="meta-sep" aria-hidden="true">·</span>The repo already has a real quorum-free fleet lease: release-lease.sh, holder + pid + liveness on a git ref<span class="meta-sep" aria-hidden="true">·</span>Raft/quorum is wrong here — most devices sleep, so a majority is rarely online</p><div class="meta-block meta-links"><div class="meta-label">Related</div><ul class="meta-row meta-row-links"><li class="chip"><span class="chip-value"><svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><a href="https://linear.app/prix/issue/RUSH-3125" target="_blank" rel="noopener">RUSH-3125</a></span></li></ul></div><p class="provenance-line" aria-label="Provenance"><span class="provenance-part"><a href="https://github.com/phnx-labs/agents-cli" target="_blank" rel="noopener">phnx-labs/agents-cli</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">plan/reconnect-architecture</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">RUSH-3125</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Claude</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Muqsit</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">zion</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part"><a href="agents://session/e9b853bc">e9b853bc</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">2026-08-25</span></p></div>
+</section>
+<nav class="toc" aria-label="Artifact sections"><a href="#purpose"><span class="toc-index">01&nbsp;&middot;&nbsp;</span>Purpose</a><a href="#proposed-changes"><span class="toc-index">02&nbsp;&middot;&nbsp;</span>Proposed Changes</a><a href="#public-interface"><span class="toc-index">03&nbsp;&middot;&nbsp;</span>Public Interface</a><a href="#validation"><span class="toc-index">04&nbsp;&middot;&nbsp;</span>Validation</a><a href="#risks"><span class="toc-index">05&nbsp;&middot;&nbsp;</span>Risks</a><a href="#checklist"><span class="toc-index">06&nbsp;&middot;&nbsp;</span>Checklist</a><a href="#tracking"><span class="toc-index">07&nbsp;&middot;&nbsp;</span>Tracking</a></nav><article class="artifact-body"><h2 id="purpose">Purpose</h2>
+<h3>What you should be able to expect — the behaviour, not the code</h3>
+<ol>
+<li><strong>My usage numbers are always current, and asking for them never costs a provider call.</strong>
+Whatever device I sit at, <code>agents view</code> shows fresh usage instantly, because someone
+else already fetched it and shared it.</li>
+<li><strong>The fleet calls the provider once per account per interval. Not once per device.</strong>
+Adding a twelfth machine must not add a twelfth stream of API calls.</li>
+<li><strong>The device doing the fetching is chosen for stability, not by luck.</strong> A Mac Mini that
+never moves should beat a laptop that goes in a backpack. If I only own laptops, it
+still works — it just picks the best available.</li>
+<li><strong>When the chosen device disappears, someone else takes over on their own</strong>, within a
+bounded time, without me noticing and without me running a command.</li>
+<li><strong>Two devices never do the shared job at the same time.</strong> Not "rarely" — never, because
+double-fetching is what gets accounts rate-limited.</li>
+<li><strong>A device that is offline, asleep, or on bad wifi degrades gracefully.</strong> It shows the
+last known numbers clearly marked as stale, rather than either lying or blocking.</li>
+<li><strong>Nothing about this requires most of my machines to be awake.</strong> My fleet is mostly
+sleeping workers and closed laptops; a design needing a majority online is a design
+that does not work here.</li>
+<li><strong>The same rule applies to every shared job</strong>, not just usage — routines, the watchdog,
+anything reading a shared queue. I should not have to reason about each one separately.</li>
+</ol>
+<h3>You were right, and I was wrong about the current state</h3>
+<p>I told you earlier that usage already used the elected-singleton pattern. <strong>It does not.</strong>
+<code>lib/account-state-service.ts</code> opens with:</p>
+<pre><code>/** Device-local owner for usage snapshots and authentication health. */
+export const USAGE_STATE_TICK_MS = 60_000;
+</code></pre>
+<p>Every device's daemon runs it, every 60 seconds, against
+<code>https://api.anthropic.com/api/oauth/usage</code> (<code>lib/accounting/usage.ts</code>).</p>
+<p>There <em>is</em> a lease — <code>withRefreshLease</code> in <code>lib/refresh-coordinator.ts</code> — but it locks
+under <code>getCacheDir()</code>, a <strong>local filesystem path</strong>. It coordinates the daemon against an
+explicit CLI refresh <em>on the same machine</em>. It has never spanned the fleet.</p>
+<p><strong>So your arithmetic is the real arithmetic:</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>today</th>
+<th>needed</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Devices refreshing</td>
+<td>11</td>
+<td>1</td>
+</tr>
+<tr>
+<td>Accounts each</td>
+<td>8</td>
+<td>8</td>
+</tr>
+<tr>
+<td>Provider calls / minute</td>
+<td><strong>88</strong></td>
+<td><strong>8</strong></td>
+</tr>
+<tr>
+<td>Calls / hour</td>
+<td><strong>5,280</strong></td>
+<td>480</td>
+</tr>
+</tbody></table>
+<aside class="artifact-callout"><strong>Load-bearing takeaway:</strong> my previous design
+said conflicts were impossible by construction. That was true only for device-owned facts,
+and I let it stand as if it covered everything. Shared-input jobs are the case it does not
+cover, and they are the case that actually hurts — because the penalty is not a data race,
+it is your accounts getting throttled.</aside><h2 id="proposed-changes">Proposed Changes</h2>
+<h3>The two job classes, stated plainly</h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><strong>Class A — device job</strong></th>
+<th><strong>Class B — fleet job</strong></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Runs on</td>
+<td>every device, independently</td>
+<td>exactly one device</td>
+</tr>
+<tr>
+<td>Input</td>
+<td>that device's own processes/files</td>
+<td>a <strong>shared</strong> resource — a provider API, a ticket tracker, a PR queue</td>
+</tr>
+<tr>
+<td>Examples</td>
+<td>session index, pid map, host-link, tab names, pane reaping</td>
+<td>usage &amp; rate limits, auth probes, routines on shared queues</td>
+</tr>
+<tr>
+<td>Failure if you get it wrong</td>
+<td>none — disjoint keys</td>
+<td><strong>provider throttling, double-execution</strong></td>
+</tr>
+<tr>
+<td>Needs</td>
+<td>nothing</td>
+<td>a lease + a broadcast</td>
+</tr>
+</tbody></table>
+<p>Everything I designed previously was Class A. This is the Class B design.</p>
+<h3>How the fleet picks who runs it</h3>
+<p>Three candidate mechanisms, and why the third one wins for your fleet:</p>
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>How it decides</th>
+<th>Why not / why yes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Raft / Consul</strong></td>
+<td>quorum of servers elects a leader</td>
+<td><strong>No.</strong> Requires a majority online. Your fleet is mostly sleeping workers and closed laptops — quorum would be unavailable most of the time. (<a href="https://developer.hashicorp.com/consul/docs/concept/consensus">Consul consensus</a>)</td>
+</tr>
+<tr>
+<td><strong>Leaderless P2P (Syncthing)</strong></td>
+<td>nobody leads; every peer equal</td>
+<td><strong>No.</strong> Great for file convergence, but it has no "run this exactly once" concept — which is the entire requirement. (<a href="https://knightli.com/en/2026/05/31/syncthing-multi-device-topology-guide/">Syncthing is peer-to-peer by design</a>)</td>
+</tr>
+<tr>
+<td><strong>Lease with holder identity + TTL</strong></td>
+<td>one writer claims a lease and must keep renewing it</td>
+<td><strong>Yes.</strong> No quorum. A dead holder is simply forgotten when its lease expires. This is what Kubernetes uses for exactly this problem. (<a href="https://www.kubernetes.io/docs/concepts/architecture/leases/">Kubernetes Leases</a>)</td>
+</tr>
+</tbody></table>
+<p>Kubernetes' <code>coordination.k8s.io/v1.Lease</code> is the reference implementation: a tiny record
+of <em>"who holds this right now, and when does it expire"</em>, driven by three timers —
+<code>LeaseDuration</code> (how long until a dead holder is forgotten), <code>RenewDeadline</code> (how long the
+holder has to renew before it voluntarily stands down), and <code>RetryPeriod</code>. The property
+that prevents split-brain is that <strong>the holder gives up on its own</strong> when it cannot renew,
+rather than waiting to be told.</p>
+<p><strong>And you already have a working one.</strong> <code>apps/cli/scripts/release-lease.sh</code> holds
+fleet-wide exclusivity by pushing an orphan commit to <code>refs/release-lock/held</code> on origin —
+git's push rejection <em>is</em> the failed acquisition, so there is no second service to run. It
+records holder host, pid and process start time, probes whether the holder is alive, and
+distinguishes <code>dead</code> / <code>alive</code> / <code>unknown</code>. That is a real, battle-tested, quorum-free
+lease <strong>in your own codebase</strong>. Generalising it beats inventing one.</p>
+<h3>The part Kubernetes does not give you: not all devices are equal</h3>
+<p>K8s treats every replica as an equal candidate. Your fleet is not equal, and this is the
+part that needs designing rather than copying.</p>
+<pre><code>                     eligibility to hold a fleet lease
+  desktop / Mac Mini  ██████████████████████  always on, never moves, wired
+  worker (yosemite-*) ████████████████        always on, but may be busy or reimaged
+  interactive laptop  ████                    sleeps, moves, changes network
+  offline / unknown   ·                       not a candidate
+</code></pre>
+<p>So the lease is not first-come-first-served. Acquisition is <strong>weighted by device class</strong>,
+and the classes come from data you already have: <code>agents devices list</code> reports <code>role</code>
+(<code>worker</code> / <code>personal</code>), an <code>interactive</code> marker, platform, and live reachability.</p>
+<p>Concretely, the rule:</p>
+<ul>
+<li>A <strong>better-classed</strong> candidate may take the lease from a worse-classed holder at a
+renewal boundary — a graceful handoff, not a fight.</li>
+<li>An <strong>equal-classed</strong> candidate never preempts. Stability beats churn.</li>
+<li>The <strong>interactive</strong> device is the <em>last</em> resort, never preferred — it is the one in your
+backpack.</li>
+<li>With no desktop present, the best available worker wins; with only laptops, a laptop
+wins. It always resolves.</li>
+</ul>
+<p>This needs one new piece of device metadata — something like <code>stability: always-on | mobile</code> — because <code>role: worker|personal</code> conflates "agents may run here" with "this
+machine is reliable". A Mac Mini you sit at is <code>personal</code> today but is the <em>best</em> lease
+holder.</p>
+<h3>Broadcast: the result is Class A once it is fetched</h3>
+<p>Once the holder fetches usage, the numbers are just another fact on the fleet stream. Peers
+read them from the feed rather than calling the provider. Every consumer already knows how
+to read that stream — it is the same <code>agents feed watch</code> pipeline the session rows ride.</p>
+<p>Each published snapshot carries <code>fetchedAt</code> and <code>fetchedBy</code>, so a stale reader can say
+<em>"usage as of 4m ago, from mac-mini"</em> instead of either lying or blocking. That satisfies
+requirement 6 without a special case.</p>
+<h3>Why this generalises</h3>
+<p>You suspected this pattern would recur, and the repo already says so:</p>
+<blockquote>
+<p>a job that consumes <em>shared</em> input (a ticket tracker, a PR queue, the feed, a sync
+bucket) MUST have exactly one executor per work item: an owner pin, an atomic claim per
+item, or verified idempotency — otherwise two daemons pick the same task and run it
+twice. — root <code>AGENTS.md</code></p>
+</blockquote>
+<p>That rule exists but is enforced by review, not by the code. Making Class B a <strong>declared
+property of a job</strong> — with the lease and the broadcast supplied by the framework — turns a
+convention people must remember into something the system does for them. Routines on shared
+queues and the watchdog then get it for free.</p>
+<h2 id="public-interface">Public Interface</h2>
+<pre><code>agents devices list                 # gains a stability column
+agents devices stability &lt;name&gt; always-on|mobile
+agents fleet lease                  # who holds each fleet job, since when, next renewal
+agents view                         # unchanged — but never calls the provider on a follower
+</code></pre>
+<div class="artifact-behavior">
+  <div class="artifact-behavior-panel" data-state="current" data-evidence="capture">
+    <strong>Current — every device fetches, forever</strong>
+<pre><code>zion         daemon → api.anthropic.com/oauth/usage × 8 accounts   every 60s
+mac-mini     daemon → api.anthropic.com/oauth/usage × 8 accounts   every 60s
+yosemite-s0  daemon → api.anthropic.com/oauth/usage × 8 accounts   every 60s
+yosemite-s1  … m0 … m1 … m2 … m3 … m4 … m5 … m6
+
+  88 provider calls / minute · 5,280 / hour · 11× more than needed</code></pre>
+    <p><code>account-state-service.ts</code> is documented "device-local owner". The
+    existing lease is under <code>getCacheDir()</code> — same machine only.</p>
+  </div>
+  <div class="artifact-behavior-panel" data-state="proposed" data-evidence="mockup">
+    <strong>Proposed — one holder, chosen for stability, broadcast to the rest</strong>
+<pre><code>$ agents fleet lease
+  JOB            HOLDER     CLASS      HELD    RENEWS   STATE
+  usage          mac-mini   always-on  4h12m   in 20s   ok
+  auth-probe     mac-mini   always-on  4h12m   in 50s   ok
+  routines:prs   mac-mini   always-on  4h12m   in 20s   ok
+
+  zion (mobile) is not a candidate while an always-on device holds.
+
+$ agents view                      # on any follower
+  claude  team@…      42% used     usage as of 18s ago, from mac-mini</code></pre>
+    <p>8 provider calls a minute for the whole fleet. A follower never calls the API — it
+    reads the broadcast, and says how fresh it is.</p>
+  </div>
+</div><h2 id="validation">Validation</h2>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Expected</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Count outbound provider calls fleet-wide for 5 min</td>
+<td>8/min total, not 88</td>
+</tr>
+<tr>
+<td>Unplug the lease holder</td>
+<td>Another device takes over within the lease TTL, unprompted</td>
+</tr>
+<tr>
+<td>Close the laptop lid</td>
+<td>Nothing changes — it was never the holder</td>
+</tr>
+<tr>
+<td>Only laptops online</td>
+<td>One laptop holds it; the job still runs</td>
+</tr>
+<tr>
+<td>Two daemons race at the same instant</td>
+<td>Exactly one acquires; the loser does not fetch</td>
+</tr>
+<tr>
+<td>Follower with no network</td>
+<td>Shows last snapshot marked stale with <code>fetchedAt</code>, never blocks</td>
+</tr>
+<tr>
+<td>Add a 12th device</td>
+<td>Provider call rate unchanged</td>
+</tr>
+</tbody></table>
+<h2 id="risks">Risks</h2>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Lease holder wedges — alive but not fetching</td>
+<td>Renewal proves liveness of the <em>job</em>, not just the process: a holder that fails its fetch stops renewing and stands down</td>
+</tr>
+<tr>
+<td>Clock skew across devices</td>
+<td>Compare monotonic elapsed-since-renew, never absolute wall-clock, as the release lease already does</td>
+</tr>
+<tr>
+<td>Preemption churn between two always-on devices</td>
+<td>Equal class never preempts; only a strictly better class may take over</td>
+</tr>
+<tr>
+<td>Followers hide a real auth failure behind a cached number</td>
+<td>Publish <code>fetchedAt</code> + <code>fetchedBy</code> with every snapshot and surface staleness in the UI</td>
+</tr>
+<tr>
+<td>Adding a Class B job without a lease</td>
+<td>Make the class a declared field of the job so the framework supplies the lease — not a convention to remember</td>
+</tr>
+</tbody></table>
+<h2 id="checklist">Checklist</h2>
+<div class="checklist"><div class="checklist-head">3 / 8 done</div><ul class="checklist-items"><li class="cl-item cl-done"><span class="cl-box">✓</span><span class="cl-text">Verify what usage actually does today (device-local, not elected — correction on record)</span></li><li class="cl-item cl-done"><span class="cl-box">✓</span><span class="cl-text">Research how this is solved elsewhere (K8s Lease · Consul/Raft · Syncthing)</span></li><li class="cl-item cl-done"><span class="cl-box">✓</span><span class="cl-text">Find the existing in-repo lease to generalise (<code>release-lease.sh</code>)</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Add <code>stability</code> to device metadata; surface in <code>agents devices list</code></span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Generalise the lease into a fleet-job primitive with holder + TTL + class-weighted acquisition</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Move usage/auth refresh onto it; publish snapshots with <code>fetchedAt</code> / <code>fetchedBy</code></span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Followers read the broadcast; remove the per-device provider call</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text"><code>agents fleet lease</code> for visibility</span></li></ul></div>
+<h2 id="tracking">Tracking</h2>
+<ul>
+<li><a href="https://linear.app/prix/issue/RUSH-3125">RUSH-3125</a> · RUSH-3183 · RUSH-3180</li>
+<li>Prior session <code>476c260d</code> — where the daemon-level requirement was set</li>
+</ul>
+</article>
+<footer class="document-footer">Phoenix Labs</footer>
+</main>
+<script type="application/json" id="artifacts-source">{"encoding":"base64","markdown":"LS0tCmtpbmQ6IHBsYW4KdGVtcGxhdGU6IHBsYW4udjEKdGl0bGU6IFR3byBraW5kcyBvZiBkYWVtb24gam9iLCBhbmQgaG93IHRoZSBmbGVldCBwaWNrcyB3aG8gcnVucyB0aGUgc2hhcmVkIG9uZQpzdW1tYXJ5OiA+LQogIFVzYWdlIGlzIHJlZnJlc2hlZCBieSBldmVyeSBkZXZpY2UgaW5kZXBlbmRlbnRseSDigJQgODggcHJvdmlkZXIgY2FsbHMgYSBtaW51dGUgd2hlcmUgOAogIHdvdWxkIGRvLiBUaGUgZGFlbW9uIG5lZWRzIHR3byBqb2IgY2xhc3NlcywgYW5kIHRoZSBzaGFyZWQgb25lIG5lZWRzIGEgbGVhc2UgaGVsZCBieSBhCiAgZGV2aWNlIGNob3NlbiBmb3Igc3RhYmlsaXR5LCBub3QgYnkgd2hvZXZlciBhc2tzIGZpcnN0LgpoZWFkZXI6IEFHSSBDTEkgwrcgZmxlZXQgc2luZ2xldG9uIGpvYnMKZm9vdGVyOiBQaG9lbml4IExhYnMKcHJvamVjdDogYWdlbnRzLWNsaQpjb250ZXh0OiA+LQogIE93bmVyOiAxMSBkZXZpY2VzIMOXIDggQ2xhdWRlIGFjY291bnRzIHJlZnJlc2hlZCBldmVyeSBtaW51dGUgaXMgRERvU2luZyB0aGUgcHJvdmlkZXIuCiAgSXQgc2hvdWxkIHJ1biBvbmNlLCBvbiBhIHN0YWJsZSBkZXZpY2Ug4oCUIGEgZGVza3RvcCBvciBNYWMgTWluaSwgbm90IGEgbGFwdG9wIHRoYXQgZ29lcwogIGluIGEgYmFja3BhY2sg4oCUIGFuZCBiZSBicm9hZGNhc3QgdG8gdGhlIGZsZWV0LiBBbmQgdGhlIHNhbWUgcGF0dGVybiB3aWxsIGJlIG5lZWRlZCBmb3IKICByb3V0aW5lcyBhbmQgdGhlIHdhdGNoZG9nLgpyZXBvc2l0b3J5OiBwaG54LWxhYnMvYWdlbnRzLWNsaQpicmFuY2g6IHBsYW4vcmVjb25uZWN0LWFyY2hpdGVjdHVyZQpzdXJmYWNlOiBjbGkKdHJhY2tpbmc6IFJVU0gtMzEyNQpzdGF0dXM6IGRyYWZ0Cmhhcm5lc3M6IGNsYXVkZQphZ2VudDogY2xhdWRlCmh1bWFuOiBNdXFzaXQKaG9zdDogemlvbgpzZXNzaW9uOiBlOWI4NTNiYwpkYXRlOiAnMjAyNi0wOC0yNScKZmFjdHM6CiAgLSAnYWNjb3VudC1zdGF0ZS1zZXJ2aWNlLnRzIGlzIGRvY3VtZW50ZWQgZGV2aWNlLWxvY2FsOiBldmVyeSBkYWVtb24gcmVmcmVzaGVzIHVzYWdlIGV2ZXJ5IDYwcycKICAtICd3aXRoUmVmcmVzaExlYXNlIGxvY2tzIHVuZGVyIGdldENhY2hlRGlyKCkg4oCUIHNhbWUtZGV2aWNlLCBjcm9zcy1wcm9jZXNzIG9ubHk7IG5vdGhpbmcgc3BhbnMgdGhlIGZsZWV0JwogIC0gJzExIGRldmljZXMgw5cgOCBhY2NvdW50cyA9IDg4IHByb3ZpZGVyIHJlZnJlc2hlcy9taW51dGUgd2hlcmUgOCB3b3VsZCBkbycKICAtICdUaGUgcmVwbyBhbHJlYWR5IGhhcyBhIHJlYWwgcXVvcnVtLWZyZWUgZmxlZXQgbGVhc2U6IHJlbGVhc2UtbGVhc2Uuc2gsIGhvbGRlciArIHBpZCArIGxpdmVuZXNzIG9uIGEgZ2l0IHJlZicKICAtICdSYWZ0L3F1b3J1bSBpcyB3cm9uZyBoZXJlIOKAlCBtb3N0IGRldmljZXMgc2xlZXAsIHNvIGEgbWFqb3JpdHkgaXMgcmFyZWx5IG9ubGluZScKbGlua3M6CiAgLSB0aXRsZTogUlVTSC0zMTI1CiAgICB1cmw6IGh0dHBzOi8vbGluZWFyLmFwcC9wcml4L2lzc3VlL1JVU0gtMzEyNQphc3NldHM6IFtdCi0tLQoKIyMgUHVycG9zZQoKIyMjIFdoYXQgeW91IHNob3VsZCBiZSBhYmxlIHRvIGV4cGVjdCDigJQgdGhlIGJlaGF2aW91ciwgbm90IHRoZSBjb2RlCgoxLiAqKk15IHVzYWdlIG51bWJlcnMgYXJlIGFsd2F5cyBjdXJyZW50LCBhbmQgYXNraW5nIGZvciB0aGVtIG5ldmVyIGNvc3RzIGEgcHJvdmlkZXIgY2FsbC4qKgogICBXaGF0ZXZlciBkZXZpY2UgSSBzaXQgYXQsIGBhZ2VudHMgdmlld2Agc2hvd3MgZnJlc2ggdXNhZ2UgaW5zdGFudGx5LCBiZWNhdXNlIHNvbWVvbmUKICAgZWxzZSBhbHJlYWR5IGZldGNoZWQgaXQgYW5kIHNoYXJlZCBpdC4KMi4gKipUaGUgZmxlZXQgY2FsbHMgdGhlIHByb3ZpZGVyIG9uY2UgcGVyIGFjY291bnQgcGVyIGludGVydmFsLiBOb3Qgb25jZSBwZXIgZGV2aWNlLioqCiAgIEFkZGluZyBhIHR3ZWxmdGggbWFjaGluZSBtdXN0IG5vdCBhZGQgYSB0d2VsZnRoIHN0cmVhbSBvZiBBUEkgY2FsbHMuCjMuICoqVGhlIGRldmljZSBkb2luZyB0aGUgZmV0Y2hpbmcgaXMgY2hvc2VuIGZvciBzdGFiaWxpdHksIG5vdCBieSBsdWNrLioqIEEgTWFjIE1pbmkgdGhhdAogICBuZXZlciBtb3ZlcyBzaG91bGQgYmVhdCBhIGxhcHRvcCB0aGF0IGdvZXMgaW4gYSBiYWNrcGFjay4gSWYgSSBvbmx5IG93biBsYXB0b3BzLCBpdAogICBzdGlsbCB3b3JrcyDigJQgaXQganVzdCBwaWNrcyB0aGUgYmVzdCBhdmFpbGFibGUuCjQuICoqV2hlbiB0aGUgY2hvc2VuIGRldmljZSBkaXNhcHBlYXJzLCBzb21lb25lIGVsc2UgdGFrZXMgb3ZlciBvbiB0aGVpciBvd24qKiwgd2l0aGluIGEKICAgYm91bmRlZCB0aW1lLCB3aXRob3V0IG1lIG5vdGljaW5nIGFuZCB3aXRob3V0IG1lIHJ1bm5pbmcgYSBjb21tYW5kLgo1LiAqKlR3byBkZXZpY2VzIG5ldmVyIGRvIHRoZSBzaGFyZWQgam9iIGF0IHRoZSBzYW1lIHRpbWUuKiogTm90ICJyYXJlbHkiIOKAlCBuZXZlciwgYmVjYXVzZQogICBkb3VibGUtZmV0Y2hpbmcgaXMgd2hhdCBnZXRzIGFjY291bnRzIHJhdGUtbGltaXRlZC4KNi4gKipBIGRldmljZSB0aGF0IGlzIG9mZmxpbmUsIGFzbGVlcCwgb3Igb24gYmFkIHdpZmkgZGVncmFkZXMgZ3JhY2VmdWxseS4qKiBJdCBzaG93cyB0aGUKICAgbGFzdCBrbm93biBudW1iZXJzIGNsZWFybHkgbWFya2VkIGFzIHN0YWxlLCByYXRoZXIgdGhhbiBlaXRoZXIgbHlpbmcgb3IgYmxvY2tpbmcuCjcuICoqTm90aGluZyBhYm91dCB0aGlzIHJlcXVpcmVzIG1vc3Qgb2YgbXkgbWFjaGluZXMgdG8gYmUgYXdha2UuKiogTXkgZmxlZXQgaXMgbW9zdGx5CiAgIHNsZWVwaW5nIHdvcmtlcnMgYW5kIGNsb3NlZCBsYXB0b3BzOyBhIGRlc2lnbiBuZWVkaW5nIGEgbWFqb3JpdHkgb25saW5lIGlzIGEgZGVzaWduCiAgIHRoYXQgZG9lcyBub3Qgd29yayBoZXJlLgo4LiAqKlRoZSBzYW1lIHJ1bGUgYXBwbGllcyB0byBldmVyeSBzaGFyZWQgam9iKiosIG5vdCBqdXN0IHVzYWdlIOKAlCByb3V0aW5lcywgdGhlIHdhdGNoZG9nLAogICBhbnl0aGluZyByZWFkaW5nIGEgc2hhcmVkIHF1ZXVlLiBJIHNob3VsZCBub3QgaGF2ZSB0byByZWFzb24gYWJvdXQgZWFjaCBvbmUgc2VwYXJhdGVseS4KCiMjIyBZb3Ugd2VyZSByaWdodCwgYW5kIEkgd2FzIHdyb25nIGFib3V0IHRoZSBjdXJyZW50IHN0YXRlCgpJIHRvbGQgeW91IGVhcmxpZXIgdGhhdCB1c2FnZSBhbHJlYWR5IHVzZWQgdGhlIGVsZWN0ZWQtc2luZ2xldG9uIHBhdHRlcm4uICoqSXQgZG9lcyBub3QuKioKYGxpYi9hY2NvdW50LXN0YXRlLXNlcnZpY2UudHNgIG9wZW5zIHdpdGg6CgpgYGB0cwovKiogRGV2aWNlLWxvY2FsIG93bmVyIGZvciB1c2FnZSBzbmFwc2hvdHMgYW5kIGF1dGhlbnRpY2F0aW9uIGhlYWx0aC4gKi8KZXhwb3J0IGNvbnN0IFVTQUdFX1NUQVRFX1RJQ0tfTVMgPSA2MF8wMDA7CmBgYAoKRXZlcnkgZGV2aWNlJ3MgZGFlbW9uIHJ1bnMgaXQsIGV2ZXJ5IDYwIHNlY29uZHMsIGFnYWluc3QKYGh0dHBzOi8vYXBpLmFudGhyb3BpYy5jb20vYXBpL29hdXRoL3VzYWdlYCAoYGxpYi9hY2NvdW50aW5nL3VzYWdlLnRzYCkuCgpUaGVyZSAqaXMqIGEgbGVhc2Ug4oCUIGB3aXRoUmVmcmVzaExlYXNlYCBpbiBgbGliL3JlZnJlc2gtY29vcmRpbmF0b3IudHNgIOKAlCBidXQgaXQgbG9ja3MKdW5kZXIgYGdldENhY2hlRGlyKClgLCBhICoqbG9jYWwgZmlsZXN5c3RlbSBwYXRoKiouIEl0IGNvb3JkaW5hdGVzIHRoZSBkYWVtb24gYWdhaW5zdCBhbgpleHBsaWNpdCBDTEkgcmVmcmVzaCAqb24gdGhlIHNhbWUgbWFjaGluZSouIEl0IGhhcyBuZXZlciBzcGFubmVkIHRoZSBmbGVldC4KCioqU28geW91ciBhcml0aG1ldGljIGlzIHRoZSByZWFsIGFyaXRobWV0aWM6KioKCnwgfCB0b2RheSB8IG5lZWRlZCB8CnwgLS0tIHwgLS0tIHwgLS0tIHwKfCBEZXZpY2VzIHJlZnJlc2hpbmcgfCAxMSB8IDEgfAp8IEFjY291bnRzIGVhY2ggfCA4IHwgOCB8CnwgUHJvdmlkZXIgY2FsbHMgLyBtaW51dGUgfCAqKjg4KiogfCAqKjgqKiB8CnwgQ2FsbHMgLyBob3VyIHwgKio1LDI4MCoqIHwgNDgwIHwKCjxhc2lkZSBjbGFzcz0iYXJ0aWZhY3QtY2FsbG91dCI+PHN0cm9uZz5Mb2FkLWJlYXJpbmcgdGFrZWF3YXk6PC9zdHJvbmc+IG15IHByZXZpb3VzIGRlc2lnbgpzYWlkIGNvbmZsaWN0cyB3ZXJlIGltcG9zc2libGUgYnkgY29uc3RydWN0aW9uLiBUaGF0IHdhcyB0cnVlIG9ubHkgZm9yIGRldmljZS1vd25lZCBmYWN0cywKYW5kIEkgbGV0IGl0IHN0YW5kIGFzIGlmIGl0IGNvdmVyZWQgZXZlcnl0aGluZy4gU2hhcmVkLWlucHV0IGpvYnMgYXJlIHRoZSBjYXNlIGl0IGRvZXMgbm90CmNvdmVyLCBhbmQgdGhleSBhcmUgdGhlIGNhc2UgdGhhdCBhY3R1YWxseSBodXJ0cyDigJQgYmVjYXVzZSB0aGUgcGVuYWx0eSBpcyBub3QgYSBkYXRhIHJhY2UsCml0IGlzIHlvdXIgYWNjb3VudHMgZ2V0dGluZyB0aHJvdHRsZWQuPC9hc2lkZT4KCiMjIFByb3Bvc2VkIENoYW5nZXMKCiMjIyBUaGUgdHdvIGpvYiBjbGFzc2VzLCBzdGF0ZWQgcGxhaW5seQoKfCB8ICoqQ2xhc3MgQSDigJQgZGV2aWNlIGpvYioqIHwgKipDbGFzcyBCIOKAlCBmbGVldCBqb2IqKiB8CnwgLS0tIHwgLS0tIHwgLS0tIHwKfCBSdW5zIG9uIHwgZXZlcnkgZGV2aWNlLCBpbmRlcGVuZGVudGx5IHwgZXhhY3RseSBvbmUgZGV2aWNlIHwKfCBJbnB1dCB8IHRoYXQgZGV2aWNlJ3Mgb3duIHByb2Nlc3Nlcy9maWxlcyB8IGEgKipzaGFyZWQqKiByZXNvdXJjZSDigJQgYSBwcm92aWRlciBBUEksIGEgdGlja2V0IHRyYWNrZXIsIGEgUFIgcXVldWUgfAp8IEV4YW1wbGVzIHwgc2Vzc2lvbiBpbmRleCwgcGlkIG1hcCwgaG9zdC1saW5rLCB0YWIgbmFtZXMsIHBhbmUgcmVhcGluZyB8IHVzYWdlICYgcmF0ZSBsaW1pdHMsIGF1dGggcHJvYmVzLCByb3V0aW5lcyBvbiBzaGFyZWQgcXVldWVzIHwKfCBGYWlsdXJlIGlmIHlvdSBnZXQgaXQgd3JvbmcgfCBub25lIOKAlCBkaXNqb2ludCBrZXlzIHwgKipwcm92aWRlciB0aHJvdHRsaW5nLCBkb3VibGUtZXhlY3V0aW9uKiogfAp8IE5lZWRzIHwgbm90aGluZyB8IGEgbGVhc2UgKyBhIGJyb2FkY2FzdCB8CgpFdmVyeXRoaW5nIEkgZGVzaWduZWQgcHJldmlvdXNseSB3YXMgQ2xhc3MgQS4gVGhpcyBpcyB0aGUgQ2xhc3MgQiBkZXNpZ24uCgojIyMgSG93IHRoZSBmbGVldCBwaWNrcyB3aG8gcnVucyBpdAoKVGhyZWUgY2FuZGlkYXRlIG1lY2hhbmlzbXMsIGFuZCB3aHkgdGhlIHRoaXJkIG9uZSB3aW5zIGZvciB5b3VyIGZsZWV0OgoKfCBBcHByb2FjaCB8IEhvdyBpdCBkZWNpZGVzIHwgV2h5IG5vdCAvIHdoeSB5ZXMgfAp8IC0tLSB8IC0tLSB8IC0tLSB8CnwgKipSYWZ0IC8gQ29uc3VsKiogfCBxdW9ydW0gb2Ygc2VydmVycyBlbGVjdHMgYSBsZWFkZXIgfCAqKk5vLioqIFJlcXVpcmVzIGEgbWFqb3JpdHkgb25saW5lLiBZb3VyIGZsZWV0IGlzIG1vc3RseSBzbGVlcGluZyB3b3JrZXJzIGFuZCBjbG9zZWQgbGFwdG9wcyDigJQgcXVvcnVtIHdvdWxkIGJlIHVuYXZhaWxhYmxlIG1vc3Qgb2YgdGhlIHRpbWUuIChbQ29uc3VsIGNvbnNlbnN1c10oaHR0cHM6Ly9kZXZlbG9wZXIuaGFzaGljb3JwLmNvbS9jb25zdWwvZG9jcy9jb25jZXB0L2NvbnNlbnN1cykpIHwKfCAqKkxlYWRlcmxlc3MgUDJQIChTeW5jdGhpbmcpKiogfCBub2JvZHkgbGVhZHM7IGV2ZXJ5IHBlZXIgZXF1YWwgfCAqKk5vLioqIEdyZWF0IGZvciBmaWxlIGNvbnZlcmdlbmNlLCBidXQgaXQgaGFzIG5vICJydW4gdGhpcyBleGFjdGx5IG9uY2UiIGNvbmNlcHQg4oCUIHdoaWNoIGlzIHRoZSBlbnRpcmUgcmVxdWlyZW1lbnQuIChbU3luY3RoaW5nIGlzIHBlZXItdG8tcGVlciBieSBkZXNpZ25dKGh0dHBzOi8va25pZ2h0bGkuY29tL2VuLzIwMjYvMDUvMzEvc3luY3RoaW5nLW11bHRpLWRldmljZS10b3BvbG9neS1ndWlkZS8pKSB8CnwgKipMZWFzZSB3aXRoIGhvbGRlciBpZGVudGl0eSArIFRUTCoqIHwgb25lIHdyaXRlciBjbGFpbXMgYSBsZWFzZSBhbmQgbXVzdCBrZWVwIHJlbmV3aW5nIGl0IHwgKipZZXMuKiogTm8gcXVvcnVtLiBBIGRlYWQgaG9sZGVyIGlzIHNpbXBseSBmb3Jnb3R0ZW4gd2hlbiBpdHMgbGVhc2UgZXhwaXJlcy4gVGhpcyBpcyB3aGF0IEt1YmVybmV0ZXMgdXNlcyBmb3IgZXhhY3RseSB0aGlzIHByb2JsZW0uIChbS3ViZXJuZXRlcyBMZWFzZXNdKGh0dHBzOi8vd3d3Lmt1YmVybmV0ZXMuaW8vZG9jcy9jb25jZXB0cy9hcmNoaXRlY3R1cmUvbGVhc2VzLykpIHwKCkt1YmVybmV0ZXMnIGBjb29yZGluYXRpb24uazhzLmlvL3YxLkxlYXNlYCBpcyB0aGUgcmVmZXJlbmNlIGltcGxlbWVudGF0aW9uOiBhIHRpbnkgcmVjb3JkCm9mICoid2hvIGhvbGRzIHRoaXMgcmlnaHQgbm93LCBhbmQgd2hlbiBkb2VzIGl0IGV4cGlyZSIqLCBkcml2ZW4gYnkgdGhyZWUgdGltZXJzIOKAlApgTGVhc2VEdXJhdGlvbmAgKGhvdyBsb25nIHVudGlsIGEgZGVhZCBob2xkZXIgaXMgZm9yZ290dGVuKSwgYFJlbmV3RGVhZGxpbmVgIChob3cgbG9uZyB0aGUKaG9sZGVyIGhhcyB0byByZW5ldyBiZWZvcmUgaXQgdm9sdW50YXJpbHkgc3RhbmRzIGRvd24pLCBhbmQgYFJldHJ5UGVyaW9kYC4gVGhlIHByb3BlcnR5CnRoYXQgcHJldmVudHMgc3BsaXQtYnJhaW4gaXMgdGhhdCAqKnRoZSBob2xkZXIgZ2l2ZXMgdXAgb24gaXRzIG93bioqIHdoZW4gaXQgY2Fubm90IHJlbmV3LApyYXRoZXIgdGhhbiB3YWl0aW5nIHRvIGJlIHRvbGQuCgoqKkFuZCB5b3UgYWxyZWFkeSBoYXZlIGEgd29ya2luZyBvbmUuKiogYGFwcHMvY2xpL3NjcmlwdHMvcmVsZWFzZS1sZWFzZS5zaGAgaG9sZHMKZmxlZXQtd2lkZSBleGNsdXNpdml0eSBieSBwdXNoaW5nIGFuIG9ycGhhbiBjb21taXQgdG8gYHJlZnMvcmVsZWFzZS1sb2NrL2hlbGRgIG9uIG9yaWdpbiDigJQKZ2l0J3MgcHVzaCByZWplY3Rpb24gKmlzKiB0aGUgZmFpbGVkIGFjcXVpc2l0aW9uLCBzbyB0aGVyZSBpcyBubyBzZWNvbmQgc2VydmljZSB0byBydW4uIEl0CnJlY29yZHMgaG9sZGVyIGhvc3QsIHBpZCBhbmQgcHJvY2VzcyBzdGFydCB0aW1lLCBwcm9iZXMgd2hldGhlciB0aGUgaG9sZGVyIGlzIGFsaXZlLCBhbmQKZGlzdGluZ3Vpc2hlcyBgZGVhZGAgLyBgYWxpdmVgIC8gYHVua25vd25gLiBUaGF0IGlzIGEgcmVhbCwgYmF0dGxlLXRlc3RlZCwgcXVvcnVtLWZyZWUKbGVhc2UgKippbiB5b3VyIG93biBjb2RlYmFzZSoqLiBHZW5lcmFsaXNpbmcgaXQgYmVhdHMgaW52ZW50aW5nIG9uZS4KCiMjIyBUaGUgcGFydCBLdWJlcm5ldGVzIGRvZXMgbm90IGdpdmUgeW91OiBub3QgYWxsIGRldmljZXMgYXJlIGVxdWFsCgpLOHMgdHJlYXRzIGV2ZXJ5IHJlcGxpY2EgYXMgYW4gZXF1YWwgY2FuZGlkYXRlLiBZb3VyIGZsZWV0IGlzIG5vdCBlcXVhbCwgYW5kIHRoaXMgaXMgdGhlCnBhcnQgdGhhdCBuZWVkcyBkZXNpZ25pbmcgcmF0aGVyIHRoYW4gY29weWluZy4KCmBgYAogICAgICAgICAgICAgICAgICAgICBlbGlnaWJpbGl0eSB0byBob2xkIGEgZmxlZXQgbGVhc2UKICBkZXNrdG9wIC8gTWFjIE1pbmkgIOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiCAgYWx3YXlzIG9uLCBuZXZlciBtb3Zlcywgd2lyZWQKICB3b3JrZXIgKHlvc2VtaXRlLSopIOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiOKWiCAgICAgICAgYWx3YXlzIG9uLCBidXQgbWF5IGJlIGJ1c3kgb3IgcmVpbWFnZWQKICBpbnRlcmFjdGl2ZSBsYXB0b3AgIOKWiOKWiOKWiOKWiCAgICAgICAgICAgICAgICAgICAgc2xlZXBzLCBtb3ZlcywgY2hhbmdlcyBuZXR3b3JrCiAgb2ZmbGluZSAvIHVua25vd24gICDCtyAgICAgICAgICAgICAgICAgICAgICAgbm90IGEgY2FuZGlkYXRlCmBgYAoKU28gdGhlIGxlYXNlIGlzIG5vdCBmaXJzdC1jb21lLWZpcnN0LXNlcnZlZC4gQWNxdWlzaXRpb24gaXMgKip3ZWlnaHRlZCBieSBkZXZpY2UgY2xhc3MqKiwKYW5kIHRoZSBjbGFzc2VzIGNvbWUgZnJvbSBkYXRhIHlvdSBhbHJlYWR5IGhhdmU6IGBhZ2VudHMgZGV2aWNlcyBsaXN0YCByZXBvcnRzIGByb2xlYAooYHdvcmtlcmAgLyBgcGVyc29uYWxgKSwgYW4gYGludGVyYWN0aXZlYCBtYXJrZXIsIHBsYXRmb3JtLCBhbmQgbGl2ZSByZWFjaGFiaWxpdHkuCgpDb25jcmV0ZWx5LCB0aGUgcnVsZToKCi0gQSAqKmJldHRlci1jbGFzc2VkKiogY2FuZGlkYXRlIG1heSB0YWtlIHRoZSBsZWFzZSBmcm9tIGEgd29yc2UtY2xhc3NlZCBob2xkZXIgYXQgYQogIHJlbmV3YWwgYm91bmRhcnkg4oCUIGEgZ3JhY2VmdWwgaGFuZG9mZiwgbm90IGEgZmlnaHQuCi0gQW4gKiplcXVhbC1jbGFzc2VkKiogY2FuZGlkYXRlIG5ldmVyIHByZWVtcHRzLiBTdGFiaWxpdHkgYmVhdHMgY2h1cm4uCi0gVGhlICoqaW50ZXJhY3RpdmUqKiBkZXZpY2UgaXMgdGhlICpsYXN0KiByZXNvcnQsIG5ldmVyIHByZWZlcnJlZCDigJQgaXQgaXMgdGhlIG9uZSBpbiB5b3VyCiAgYmFja3BhY2suCi0gV2l0aCBubyBkZXNrdG9wIHByZXNlbnQsIHRoZSBiZXN0IGF2YWlsYWJsZSB3b3JrZXIgd2luczsgd2l0aCBvbmx5IGxhcHRvcHMsIGEgbGFwdG9wCiAgd2lucy4gSXQgYWx3YXlzIHJlc29sdmVzLgoKVGhpcyBuZWVkcyBvbmUgbmV3IHBpZWNlIG9mIGRldmljZSBtZXRhZGF0YSDigJQgc29tZXRoaW5nIGxpa2UgYHN0YWJpbGl0eTogYWx3YXlzLW9uIHwKbW9iaWxlYCDigJQgYmVjYXVzZSBgcm9sZTogd29ya2VyfHBlcnNvbmFsYCBjb25mbGF0ZXMgImFnZW50cyBtYXkgcnVuIGhlcmUiIHdpdGggInRoaXMKbWFjaGluZSBpcyByZWxpYWJsZSIuIEEgTWFjIE1pbmkgeW91IHNpdCBhdCBpcyBgcGVyc29uYWxgIHRvZGF5IGJ1dCBpcyB0aGUgKmJlc3QqIGxlYXNlCmhvbGRlci4KCiMjIyBCcm9hZGNhc3Q6IHRoZSByZXN1bHQgaXMgQ2xhc3MgQSBvbmNlIGl0IGlzIGZldGNoZWQKCk9uY2UgdGhlIGhvbGRlciBmZXRjaGVzIHVzYWdlLCB0aGUgbnVtYmVycyBhcmUganVzdCBhbm90aGVyIGZhY3Qgb24gdGhlIGZsZWV0IHN0cmVhbS4gUGVlcnMKcmVhZCB0aGVtIGZyb20gdGhlIGZlZWQgcmF0aGVyIHRoYW4gY2FsbGluZyB0aGUgcHJvdmlkZXIuIEV2ZXJ5IGNvbnN1bWVyIGFscmVhZHkga25vd3MgaG93CnRvIHJlYWQgdGhhdCBzdHJlYW0g4oCUIGl0IGlzIHRoZSBzYW1lIGBhZ2VudHMgZmVlZCB3YXRjaGAgcGlwZWxpbmUgdGhlIHNlc3Npb24gcm93cyByaWRlLgoKRWFjaCBwdWJsaXNoZWQgc25hcHNob3QgY2FycmllcyBgZmV0Y2hlZEF0YCBhbmQgYGZldGNoZWRCeWAsIHNvIGEgc3RhbGUgcmVhZGVyIGNhbiBzYXkKKiJ1c2FnZSBhcyBvZiA0bSBhZ28sIGZyb20gbWFjLW1pbmkiKiBpbnN0ZWFkIG9mIGVpdGhlciBseWluZyBvciBibG9ja2luZy4gVGhhdCBzYXRpc2ZpZXMKcmVxdWlyZW1lbnQgNiB3aXRob3V0IGEgc3BlY2lhbCBjYXNlLgoKIyMjIFdoeSB0aGlzIGdlbmVyYWxpc2VzCgpZb3Ugc3VzcGVjdGVkIHRoaXMgcGF0dGVybiB3b3VsZCByZWN1ciwgYW5kIHRoZSByZXBvIGFscmVhZHkgc2F5cyBzbzoKCj4gYSBqb2IgdGhhdCBjb25zdW1lcyAqc2hhcmVkKiBpbnB1dCAoYSB0aWNrZXQgdHJhY2tlciwgYSBQUiBxdWV1ZSwgdGhlIGZlZWQsIGEgc3luYwo+IGJ1Y2tldCkgTVVTVCBoYXZlIGV4YWN0bHkgb25lIGV4ZWN1dG9yIHBlciB3b3JrIGl0ZW06IGFuIG93bmVyIHBpbiwgYW4gYXRvbWljIGNsYWltIHBlcgo+IGl0ZW0sIG9yIHZlcmlmaWVkIGlkZW1wb3RlbmN5IOKAlCBvdGhlcndpc2UgdHdvIGRhZW1vbnMgcGljayB0aGUgc2FtZSB0YXNrIGFuZCBydW4gaXQKPiB0d2ljZS4g4oCUIHJvb3QgYEFHRU5UUy5tZGAKClRoYXQgcnVsZSBleGlzdHMgYnV0IGlzIGVuZm9yY2VkIGJ5IHJldmlldywgbm90IGJ5IHRoZSBjb2RlLiBNYWtpbmcgQ2xhc3MgQiBhICoqZGVjbGFyZWQKcHJvcGVydHkgb2YgYSBqb2IqKiDigJQgd2l0aCB0aGUgbGVhc2UgYW5kIHRoZSBicm9hZGNhc3Qgc3VwcGxpZWQgYnkgdGhlIGZyYW1ld29yayDigJQgdHVybnMgYQpjb252ZW50aW9uIHBlb3BsZSBtdXN0IHJlbWVtYmVyIGludG8gc29tZXRoaW5nIHRoZSBzeXN0ZW0gZG9lcyBmb3IgdGhlbS4gUm91dGluZXMgb24gc2hhcmVkCnF1ZXVlcyBhbmQgdGhlIHdhdGNoZG9nIHRoZW4gZ2V0IGl0IGZvciBmcmVlLgoKIyMgUHVibGljIEludGVyZmFjZQoKYGBgYmFzaAphZ2VudHMgZGV2aWNlcyBsaXN0ICAgICAgICAgICAgICAgICAjIGdhaW5zIGEgc3RhYmlsaXR5IGNvbHVtbgphZ2VudHMgZGV2aWNlcyBzdGFiaWxpdHkgPG5hbWU+IGFsd2F5cy1vbnxtb2JpbGUKYWdlbnRzIGZsZWV0IGxlYXNlICAgICAgICAgICAgICAgICAgIyB3aG8gaG9sZHMgZWFjaCBmbGVldCBqb2IsIHNpbmNlIHdoZW4sIG5leHQgcmVuZXdhbAphZ2VudHMgdmlldyAgICAgICAgICAgICAgICAgICAgICAgICAjIHVuY2hhbmdlZCDigJQgYnV0IG5ldmVyIGNhbGxzIHRoZSBwcm92aWRlciBvbiBhIGZvbGxvd2VyCmBgYAoKPGRpdiBjbGFzcz0iYXJ0aWZhY3QtYmVoYXZpb3IiPgogIDxkaXYgY2xhc3M9ImFydGlmYWN0LWJlaGF2aW9yLXBhbmVsIiBkYXRhLXN0YXRlPSJjdXJyZW50IiBkYXRhLWV2aWRlbmNlPSJjYXB0dXJlIj4KICAgIDxzdHJvbmc+Q3VycmVudCDigJQgZXZlcnkgZGV2aWNlIGZldGNoZXMsIGZvcmV2ZXI8L3N0cm9uZz4KPHByZT48Y29kZT56aW9uICAgICAgICAgZGFlbW9uIOKGkiBhcGkuYW50aHJvcGljLmNvbS9vYXV0aC91c2FnZSDDlyA4IGFjY291bnRzICAgZXZlcnkgNjBzCm1hYy1taW5pICAgICBkYWVtb24g4oaSIGFwaS5hbnRocm9waWMuY29tL29hdXRoL3VzYWdlIMOXIDggYWNjb3VudHMgICBldmVyeSA2MHMKeW9zZW1pdGUtczAgIGRhZW1vbiDihpIgYXBpLmFudGhyb3BpYy5jb20vb2F1dGgvdXNhZ2Ugw5cgOCBhY2NvdW50cyAgIGV2ZXJ5IDYwcwp5b3NlbWl0ZS1zMSAg4oCmIG0wIOKApiBtMSDigKYgbTIg4oCmIG0zIOKApiBtNCDigKYgbTUg4oCmIG02CgogIDg4IHByb3ZpZGVyIGNhbGxzIC8gbWludXRlIMK3IDUsMjgwIC8gaG91ciDCtyAxMcOXIG1vcmUgdGhhbiBuZWVkZWQ8L2NvZGU+PC9wcmU+CiAgICA8cD48Y29kZT5hY2NvdW50LXN0YXRlLXNlcnZpY2UudHM8L2NvZGU+IGlzIGRvY3VtZW50ZWQgImRldmljZS1sb2NhbCBvd25lciIuIFRoZQogICAgZXhpc3RpbmcgbGVhc2UgaXMgdW5kZXIgPGNvZGU+Z2V0Q2FjaGVEaXIoKTwvY29kZT4g4oCUIHNhbWUgbWFjaGluZSBvbmx5LjwvcD4KICA8L2Rpdj4KICA8ZGl2IGNsYXNzPSJhcnRpZmFjdC1iZWhhdmlvci1wYW5lbCIgZGF0YS1zdGF0ZT0icHJvcG9zZWQiIGRhdGEtZXZpZGVuY2U9Im1vY2t1cCI+CiAgICA8c3Ryb25nPlByb3Bvc2VkIOKAlCBvbmUgaG9sZGVyLCBjaG9zZW4gZm9yIHN0YWJpbGl0eSwgYnJvYWRjYXN0IHRvIHRoZSByZXN0PC9zdHJvbmc+CjxwcmU+PGNvZGU+JCBhZ2VudHMgZmxlZXQgbGVhc2UKICBKT0IgICAgICAgICAgICBIT0xERVIgICAgIENMQVNTICAgICAgSEVMRCAgICBSRU5FV1MgICBTVEFURQogIHVzYWdlICAgICAgICAgIG1hYy1taW5pICAgYWx3YXlzLW9uICA0aDEybSAgIGluIDIwcyAgIG9rCiAgYXV0aC1wcm9iZSAgICAgbWFjLW1pbmkgICBhbHdheXMtb24gIDRoMTJtICAgaW4gNTBzICAgb2sKICByb3V0aW5lczpwcnMgICBtYWMtbWluaSAgIGFsd2F5cy1vbiAgNGgxMm0gICBpbiAyMHMgICBvawoKICB6aW9uIChtb2JpbGUpIGlzIG5vdCBhIGNhbmRpZGF0ZSB3aGlsZSBhbiBhbHdheXMtb24gZGV2aWNlIGhvbGRzLgoKJCBhZ2VudHMgdmlldyAgICAgICAgICAgICAgICAgICAgICAjIG9uIGFueSBmb2xsb3dlcgogIGNsYXVkZSAgdGVhbUDigKYgICAgICA0MiUgdXNlZCAgICAgdXNhZ2UgYXMgb2YgMThzIGFnbywgZnJvbSBtYWMtbWluaTwvY29kZT48L3ByZT4KICAgIDxwPjggcHJvdmlkZXIgY2FsbHMgYSBtaW51dGUgZm9yIHRoZSB3aG9sZSBmbGVldC4gQSBmb2xsb3dlciBuZXZlciBjYWxscyB0aGUgQVBJIOKAlCBpdAogICAgcmVhZHMgdGhlIGJyb2FkY2FzdCwgYW5kIHNheXMgaG93IGZyZXNoIGl0IGlzLjwvcD4KICA8L2Rpdj4KPC9kaXY+CgojIyBWYWxpZGF0aW9uCgp8IENoZWNrIHwgRXhwZWN0ZWQgfAp8IC0tLSB8IC0tLSB8CnwgQ291bnQgb3V0Ym91bmQgcHJvdmlkZXIgY2FsbHMgZmxlZXQtd2lkZSBmb3IgNSBtaW4gfCA4L21pbiB0b3RhbCwgbm90IDg4IHwKfCBVbnBsdWcgdGhlIGxlYXNlIGhvbGRlciB8IEFub3RoZXIgZGV2aWNlIHRha2VzIG92ZXIgd2l0aGluIHRoZSBsZWFzZSBUVEwsIHVucHJvbXB0ZWQgfAp8IENsb3NlIHRoZSBsYXB0b3AgbGlkIHwgTm90aGluZyBjaGFuZ2VzIOKAlCBpdCB3YXMgbmV2ZXIgdGhlIGhvbGRlciB8CnwgT25seSBsYXB0b3BzIG9ubGluZSB8IE9uZSBsYXB0b3AgaG9sZHMgaXQ7IHRoZSBqb2Igc3RpbGwgcnVucyB8CnwgVHdvIGRhZW1vbnMgcmFjZSBhdCB0aGUgc2FtZSBpbnN0YW50IHwgRXhhY3RseSBvbmUgYWNxdWlyZXM7IHRoZSBsb3NlciBkb2VzIG5vdCBmZXRjaCB8CnwgRm9sbG93ZXIgd2l0aCBubyBuZXR3b3JrIHwgU2hvd3MgbGFzdCBzbmFwc2hvdCBtYXJrZWQgc3RhbGUgd2l0aCBgZmV0Y2hlZEF0YCwgbmV2ZXIgYmxvY2tzIHwKfCBBZGQgYSAxMnRoIGRldmljZSB8IFByb3ZpZGVyIGNhbGwgcmF0ZSB1bmNoYW5nZWQgfAoKIyMgUmlza3MKCnwgUmlzayB8IE1pdGlnYXRpb24gfAp8IC0tLSB8IC0tLSB8CnwgTGVhc2UgaG9sZGVyIHdlZGdlcyDigJQgYWxpdmUgYnV0IG5vdCBmZXRjaGluZyB8IFJlbmV3YWwgcHJvdmVzIGxpdmVuZXNzIG9mIHRoZSAqam9iKiwgbm90IGp1c3QgdGhlIHByb2Nlc3M6IGEgaG9sZGVyIHRoYXQgZmFpbHMgaXRzIGZldGNoIHN0b3BzIHJlbmV3aW5nIGFuZCBzdGFuZHMgZG93biB8CnwgQ2xvY2sgc2tldyBhY3Jvc3MgZGV2aWNlcyB8IENvbXBhcmUgbW9ub3RvbmljIGVsYXBzZWQtc2luY2UtcmVuZXcsIG5ldmVyIGFic29sdXRlIHdhbGwtY2xvY2ssIGFzIHRoZSByZWxlYXNlIGxlYXNlIGFscmVhZHkgZG9lcyB8CnwgUHJlZW1wdGlvbiBjaHVybiBiZXR3ZWVuIHR3byBhbHdheXMtb24gZGV2aWNlcyB8IEVxdWFsIGNsYXNzIG5ldmVyIHByZWVtcHRzOyBvbmx5IGEgc3RyaWN0bHkgYmV0dGVyIGNsYXNzIG1heSB0YWtlIG92ZXIgfAp8IEZvbGxvd2VycyBoaWRlIGEgcmVhbCBhdXRoIGZhaWx1cmUgYmVoaW5kIGEgY2FjaGVkIG51bWJlciB8IFB1Ymxpc2ggYGZldGNoZWRBdGAgKyBgZmV0Y2hlZEJ5YCB3aXRoIGV2ZXJ5IHNuYXBzaG90IGFuZCBzdXJmYWNlIHN0YWxlbmVzcyBpbiB0aGUgVUkgfAp8IEFkZGluZyBhIENsYXNzIEIgam9iIHdpdGhvdXQgYSBsZWFzZSB8IE1ha2UgdGhlIGNsYXNzIGEgZGVjbGFyZWQgZmllbGQgb2YgdGhlIGpvYiBzbyB0aGUgZnJhbWV3b3JrIHN1cHBsaWVzIHRoZSBsZWFzZSDigJQgbm90IGEgY29udmVudGlvbiB0byByZW1lbWJlciB8CgojIyBDaGVja2xpc3QKCi0gW3hdIFZlcmlmeSB3aGF0IHVzYWdlIGFjdHVhbGx5IGRvZXMgdG9kYXkgKGRldmljZS1sb2NhbCwgbm90IGVsZWN0ZWQg4oCUIGNvcnJlY3Rpb24gb24gcmVjb3JkKQotIFt4XSBSZXNlYXJjaCBob3cgdGhpcyBpcyBzb2x2ZWQgZWxzZXdoZXJlIChLOHMgTGVhc2UgwrcgQ29uc3VsL1JhZnQgwrcgU3luY3RoaW5nKQotIFt4XSBGaW5kIHRoZSBleGlzdGluZyBpbi1yZXBvIGxlYXNlIHRvIGdlbmVyYWxpc2UgKGByZWxlYXNlLWxlYXNlLnNoYCkKLSBbIF0gQWRkIGBzdGFiaWxpdHlgIHRvIGRldmljZSBtZXRhZGF0YTsgc3VyZmFjZSBpbiBgYWdlbnRzIGRldmljZXMgbGlzdGAKLSBbIF0gR2VuZXJhbGlzZSB0aGUgbGVhc2UgaW50byBhIGZsZWV0LWpvYiBwcmltaXRpdmUgd2l0aCBob2xkZXIgKyBUVEwgKyBjbGFzcy13ZWlnaHRlZCBhY3F1aXNpdGlvbgotIFsgXSBNb3ZlIHVzYWdlL2F1dGggcmVmcmVzaCBvbnRvIGl0OyBwdWJsaXNoIHNuYXBzaG90cyB3aXRoIGBmZXRjaGVkQXRgIC8gYGZldGNoZWRCeWAKLSBbIF0gRm9sbG93ZXJzIHJlYWQgdGhlIGJyb2FkY2FzdDsgcmVtb3ZlIHRoZSBwZXItZGV2aWNlIHByb3ZpZGVyIGNhbGwKLSBbIF0gYGFnZW50cyBmbGVldCBsZWFzZWAgZm9yIHZpc2liaWxpdHkKCiMjIFRyYWNraW5nCgotIFtSVVNILTMxMjVdKGh0dHBzOi8vbGluZWFyLmFwcC9wcml4L2lzc3VlL1JVU0gtMzEyNSkgwrcgUlVTSC0zMTgzIMK3IFJVU0gtMzE4MAotIFByaW9yIHNlc3Npb24gYDQ3NmMyNjBkYCDigJQgd2hlcmUgdGhlIGRhZW1vbi1sZXZlbCByZXF1aXJlbWVudCB3YXMgc2V0Cg=="}</script>
+<script>
+(() => {
+  const root = document.documentElement;
+  const button = document.querySelector('.theme-toggle');
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  const configured = "system";
+  const stored = () => { try { const value = localStorage.getItem('artifacts-theme'); return value === 'light' || value === 'dark' ? value : null; } catch { return null; } };
+  const preferred = () => stored() || (configured === 'system' ? (media.matches ? 'dark' : 'light') : configured);
+  const apply = (theme, persist) => {
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    const next = theme === 'dark' ? 'light' : 'dark';
+    button.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+    button.setAttribute('title', 'Switch to ' + next + ' theme');
+    button.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    if (persist) { try { localStorage.setItem('artifacts-theme', theme); } catch {} }
+  };
+  apply(preferred(), false);
+  button.addEventListener('click', () => apply(root.dataset.theme === 'dark' ? 'light' : 'dark', true));
+  media.addEventListener('change', () => { if (configured === 'system' && !stored()) apply(media.matches ? 'dark' : 'light', false); });
+})();
+</script>
+</body>
+</html>
