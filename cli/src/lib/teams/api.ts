@@ -5,7 +5,7 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 
-import { AgentManager, AgentStatus, resolveMode, type TaskType } from './agents.js';
+import { AgentManager, AgentStatus, resolveMode, type TaskType, type TeammateFailure } from './agents.js';
 import { AgentType } from './parsers.js';
 import { getDelta } from './summarizer.js';
 import { debug } from './debug.js';
@@ -86,6 +86,8 @@ export interface SpawnResult {
   cloud_session_id?: string | null;
   /** Device name the teammate runs on for a distributed (--on) teammate; null for local. */
   host?: string | null;
+  /** Sanitized evidence observed at the lifecycle boundary that failed. */
+  failure?: TeammateFailure | null;
 }
 
 /** Detailed status of a single teammate, including file ops, commands, and a cursor for delta polling. */
@@ -125,6 +127,8 @@ export interface AgentStatusDetail {
   task_type?: TaskType | null;
   /** Device name the teammate runs on for a distributed (--on) teammate; null for local. */
   host?: string | null;
+  /** Sanitized evidence observed at the lifecycle boundary that failed. */
+  failure?: TeammateFailure | null;
 }
 
 /** Aggregated status of all teammates in a task, with per-status counts and a global cursor. */
@@ -171,6 +175,7 @@ export interface AgentStatusSummary {
   last_messages: string[];
   /** Device name for a distributed (--on) teammate; null for local. */
   host: string | null;
+  failure: TeammateFailure | null;
   /** ISO timestamp — feed back via --since for delta polling. */
   cursor: string;
 }
@@ -254,6 +259,7 @@ export function toAgentStatusSummary(detail: AgentStatusDetail): AgentStatusSumm
       .slice(-SUMMARY_MAX_MESSAGES)
       .map((m) => trimMessage(m)),
     host: detail.host ?? null,
+    failure: detail.failure ?? null,
     cursor: detail.cursor,
   };
 }
@@ -489,6 +495,7 @@ export async function handleStatus(
       after: agent.after,
       task_type: agent.taskType,
       host: agent.hostName,
+      failure: agent.failure,
       mode: agent.mode,
       cloud_session_id: agent.cloudSessionId,
       cloud_provider: agent.cloudProvider,

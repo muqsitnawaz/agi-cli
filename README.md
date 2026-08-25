@@ -741,6 +741,11 @@ Teammates run detached -- close your terminal, they keep working. Check in with 
 
 Team state is observable via `agents teams list --json` / `agents teams status --json` (compact by default; add `--verbose` for the full per-teammate shape). External tools join it with `sessions --json` (teammates get `isTeamOrigin: true`) and `cloud list --json` (for `--cloud` teammates) to build a unified fleet view. See [docs/observability.md](cli/docs/observability.md).
 
+Placement, spawn, dependency, and non-zero-exit failures are persisted as sanitized
+evidence on the teammate record and shown by `teams status`. A failed root does not stop
+independent DAG branches; descendants name the failed or missing `--after` dependency
+that blocked them instead of remaining pending indefinitely.
+
 ---
 
 ## Cloud

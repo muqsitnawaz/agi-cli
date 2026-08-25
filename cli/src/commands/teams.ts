@@ -933,6 +933,9 @@ function printAgentDetail(a: AgentStatusDetail, session: SessionMeta | null): vo
   if (a.host) {
     console.log(`    ${chalk.gray('host    ')} ${chalk.cyan(a.host)}`);
   }
+  if (a.failure) {
+    console.log(`    ${chalk.red('failure ')} ${a.failure.code}: ${a.failure.message}`);
+  }
   // If the agent's internal session id differs from ours (non-Claude), show
   // it as a hint for `agents sessions <id>`.
   if (a.remote_session_id && a.remote_session_id !== a.agent_id) {
@@ -1018,6 +1021,9 @@ function printAgentSummary(s: AgentStatusSummary): void {
   console.log(
     `  ${chalk.cyan(handle.padEnd(14))} ${ident.padEnd(11)} ${label}${duration}${tools}${hostBadge}${errBadge}`
   );
+  if (s.failure) {
+    console.log(`    ${chalk.red('failure ')} ${s.failure.code}: ${s.failure.message}`);
+  }
 
   // Files: counts + basenames. Read is count only.
   const fileLines: string[] = [];
@@ -2156,35 +2162,8 @@ export function registerTeamsCommands(program: Command): void {
         });
       }
 
-      let cloudSessionId: string | null = null;
+      const cloudSessionId: string | null = null;
       const isStaged = after.length > 0;
-      if (cloudProviderId && !isStaged) {
-        // Ready to run now: dispatch to the cloud provider before registering
-        // the teammate so we have the remote session id up front.
-        //
-        // resolveProvider() and shareRuntimeEnv() are INSIDE the try on purpose:
-        // both read config (the cloud registry; `agents.yaml`'s share block) and
-        // both throw on a malformed one, and by this point the worktree already
-        // exists — leaving them outside stranded the branch with no catch at all.
-        try {
-          const prov = resolveProvider(cloudProviderId);
-          const dispatchOpts: DispatchOptions = {
-            prompt: effectiveTask,
-            agent,
-            repo: opts.repo,
-            branch: opts.branch,
-            model: opts.model,
-            env: shareRuntimeEnv(),
-          };
-          const cloudTask = await prov.dispatch(dispatchOpts);
-          cloudSessionId = cloudTask.id;
-        } catch (err) {
-          // Same orphan class as a failed spawn: this add already created its
-          // worktree, so a dispatch failure must not strand the branch either.
-          await tearDownCreatedWorktree();
-          dieFriction('teams', 'cloud-dispatch-failed', `Cloud dispatch failed: ${(err as Error).message}`);
-        }
-      }
 
       try {
         const result = await handleSpawn(
@@ -2402,7 +2381,7 @@ export function registerTeamsCommands(program: Command): void {
 
   // start — fire any staged teammates whose --after deps have all completed
   addHostOption(teams.command('start [team]'))
-    .description('Launch any pending teammates whose --after dependencies are satisfied. Use --watch to keep draining the DAG as teammates finish and as new tasks are added mid-flight.')
+    .description('Launch ready teammates independently. Failed launch/placement and blocked --after dependencies persist in status; --watch keeps draining viable DAG branches.')
     .option('--json', 'Output machine-readable JSON')
     .option('--watch', 'Keep running: poll every --interval seconds, fire new waves, exit when the DAG drains.')
     .option('--interval <seconds>', 'Seconds between waves in --watch mode (default 8)', '8')
@@ -2439,29 +2418,6 @@ export function registerTeamsCommands(program: Command): void {
       if (!opts.force && !isJsonMode(opts)) {
         await warnUnsignedTeammates(mgr, team);
         await warnThrottledTeammates(mgr, team);
-      }
-
-      // Health-/harness-aware pre-flight (RUSH-2002): if the team declares a
-      // device pool and no device in it can run a pending teammate's agent, fail
-      // loud here rather than launching a wave that strands teammates pending.
-      // --force downgrades it to a warning so the user can still try.
-      const placementError = await mgr.preflightPlacement(team);
-      if (placementError) {
-        if (isJsonMode(opts)) {
-          console.log(JSON.stringify({
-            team,
-            error: 'no-viable-device',
-            message: placementError.message,
-            excluded: placementError.excluded,
-          }));
-          if (!opts.force) { process.exitCode = 1; return; }
-        } else if (opts.force) {
-          console.error(chalk.yellow(`⚠ ${placementError.message}\n  Continuing anyway (--force).`));
-        } else {
-          console.error(chalk.red(placementError.message));
-          process.exitCode = 1;
-          return;
-        }
       }
 
       emit('teams.start', { module: 'teams', team, watch: Boolean(opts.watch) });

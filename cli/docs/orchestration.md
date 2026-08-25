@@ -34,6 +34,18 @@ established, artifacts produced, or a verdict returned. These contracts guide th
 teammates and reviewers; they are not machine-validated gates. Today a dependent becomes
 ready when every declared upstream process exits successfully.
 
+Failure evidence is part of the durable teammate record. It contains only facts observed
+at a lifecycle boundary: `stage`, stable `code`, sanitized `message`, `exit_code`,
+`retryable`, and `observed_at`. Teams never infer a root cause from transcript prose.
+`agents teams status` includes this evidence in both its default text and additive JSON
+shape, so a new CLI invocation sees the same failure as the supervisor that observed it.
+
+Placement and launch failures are handled per runnable node. One unplaceable root becomes
+failed with evidence while other ready roots still launch. A pending node whose explicit
+`--after` dependency failed, stopped, or is missing becomes failed with a
+`dependency-failed` record naming every blocker; it does not remain pending until
+`--max-waves`. The existing Teams supervisor remains the only graph owner and dispatcher.
+
 ```mermaid
 stateDiagram-v2
   [*] --> Pending
@@ -76,6 +88,8 @@ a parallel execution engine. Budget and repository-freshness gates run before sp
 - A member has one execution identity and one owned worktree per attempt.
 - Dependency readiness comes from successful upstream process completion, not transcript
   guessing; promised artifacts still require downstream or reviewer verification.
+- A failed runnable node cannot prevent an independent ready branch from advancing.
+- Failed or missing dependencies terminalize descendants with explicit blocker evidence.
 - Local and remote members cross the same capability and execution boundaries.
 - Cancellation and retry are explicit state transitions with durable history.
 - A workflow or subagent cannot bypass team supervision or the execution engine.

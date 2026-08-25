@@ -88,10 +88,8 @@ describe('runSupervisor', () => {
   });
 
   it('picks up a teammate added mid-flight', async () => {
-    // Simulate a worker filing a new task during its run. `after` points at
-    // a never-completing dep so startReady can't auto-launch it — the
-    // teammate stays PENDING for observation, then we flip it to completed
-    // on wave 3 to drain.
+    // Simulate a worker filing a task with an invalid dependency. The next
+    // wave must observe it and terminalize it truthfully instead of spinning.
     let added = false;
     let wavesSeen = 0;
     const waveSnaps: Array<{ pending: number; running: number; completed: number }> = [];
@@ -113,25 +111,17 @@ describe('runSupervisor', () => {
           });
           return;
         }
-        if (wavesSeen >= 3) {
-          // Release the teammate: mark completed so the DAG can drain.
-          const all = await mgr.listByTask('dyn');
-          for (const a of all) {
-            if (a.name === 'late-pending' && a.status !== AgentStatus.COMPLETED) {
-              a.status = AgentStatus.COMPLETED;
-              a.completedAt = new Date();
-              await a.saveMeta();
-            }
-          }
-        }
       },
     });
 
     expect(result.stoppedBy).toBe('drained');
-    expect(result.waves).toBeGreaterThanOrEqual(3);
-    // Key invariant: at least one wave observed >=1 pending (the late add
-    // was noticed) before drain.
-    expect(waveSnaps.some((s) => s.pending >= 1)).toBe(true);
+    expect(result.waves).toBe(2);
+    const [failed] = await mgr.listByTask('dyn');
+    expect(failed.status).toBe(AgentStatus.FAILED);
+    expect(failed.failure).toMatchObject({
+      stage: 'dependency', code: 'dependency-failed',
+      message: 'Blocked by dependency: __never_done__ (missing).',
+    });
   });
 
   it('stops when onWave returns false', async () => {

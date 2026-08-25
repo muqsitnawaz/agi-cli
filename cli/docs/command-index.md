@@ -823,7 +823,7 @@ agents teams message <team> <teammate> <message>  Send a follow-up message to a 
 agents teams pr-watch [team]                      Watch the PRs a team opened and react autonomously: RED CI -> spawn a fix teammate with the failure logs; new review comment -> route a bugfix teammate. Both slot into the team DAG (visible in `teams status`).
 agents teams remove [team] [teammate]             Remove a stopped teammate's logs and metadata. Use 'stop' first to end a running teammate.
 agents teams resume <team> <teammate> [message]   Resume a stopped teammate (completed/failed/stopped) by re-entering its own session with a message as the next user turn. If the teammate is still running, the message is steered via its mailbox instead.
-agents teams start [team]                         Launch any pending teammates whose --after dependencies are satisfied. Use --watch to keep draining the DAG as teammates finish and as new tasks are added mid-flight.
+agents teams start [team]                         Launch ready teammates independently. Failed launch/placement and blocked --after dependencies persist in status; --watch keeps draining viable DAG branches.
 agents teams status [team]                        Check in on a team: status, files touched, recent commands, last messages. Pass --verbose for the full per-teammate dump; --since for delta polling.
 agents teams stop [team] [teammate]               Stop a running teammate. Resume it later with `agents teams resume`. Cleans up worktree if no uncommitted changes.
 ```

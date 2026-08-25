@@ -105,6 +105,14 @@ describe('toAgentStatusSummary', () => {
     expect(summary.delivery).toBe('in_progress');
   });
 
+  it('passes additive failure evidence through the compact JSON shape', () => {
+    const failure = {
+      stage: 'placement' as const, code: 'no-viable-device', message: 'No viable device.',
+      exit_code: null, retryable: false, observed_at: '2026-08-25T21:00:00.000Z',
+    };
+    expect(toAgentStatusSummary(fakeDetail({ status: 'failed', failure })).failure).toEqual(failure);
+  });
+
   it('marks completed+pr_url as delivery pr_open (RUSH-2380)', () => {
     const summary = toAgentStatusSummary(
       fakeDetail({ status: 'completed', completed_at: '2026-06-08T00:05:00.000Z' }),
