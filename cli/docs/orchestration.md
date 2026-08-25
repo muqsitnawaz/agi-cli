@@ -15,7 +15,7 @@ flowchart TB
   B --> WB[Isolated worktree]
   A --> RA[Execution result]
   B --> RB[Execution result]
-  RA --> C{Dependencies satisfied?}
+  RA --> C{Dependencies completed successfully?}
   RB --> C
   C -->|yes| D[Dependent teammate]
 ```
@@ -25,20 +25,21 @@ flowchart TB
 The team is the durable coordination object. It records members, dependency edges,
 placement, execution identifiers, and outcomes. A teammate is an ordinary agent run with
 a team identity; it does not get a privileged execution path. Its conversation is useful
-evidence, but the supervisor relies on execution state and declared outputs rather than
-interpreting transcript prose as completion.
+evidence, but the supervisor relies on execution state rather than interpreting
+transcript prose as completion.
 
 Each coding teammate works in an isolated worktree. Isolation prevents concurrent edits
 from colliding, while boundary contracts make the handoff explicit: files owned, facts
-established, artifacts produced, or a verdict returned. A dependent node becomes ready
-only when every required upstream contract has a satisfactory terminal outcome.
+established, artifacts produced, or a verdict returned. These contracts guide the
+teammates and reviewers; they are not machine-validated gates. Today a dependent becomes
+ready when every declared upstream process exits successfully.
 
 ```mermaid
 stateDiagram-v2
   [*] --> Pending
   Pending --> Ready: dependencies satisfied
   Ready --> Running: execution claimed
-  Running --> Completed: contract delivered
+  Running --> Completed: process exits successfully
   Running --> Failed: terminal failure
   Running --> Waiting: input required
   Waiting --> Running: resumed
@@ -73,7 +74,8 @@ a parallel execution engine. Budget and repository-freshness gates run before sp
 ## Invariants
 
 - A member has one execution identity and one owned worktree per attempt.
-- Dependency readiness comes from declared outcomes, not transcript guessing.
+- Dependency readiness comes from successful upstream process completion, not transcript
+  guessing; promised artifacts still require downstream or reviewer verification.
 - Local and remote members cross the same capability and execution boundaries.
 - Cancellation and retry are explicit state transitions with durable history.
 - A workflow or subagent cannot bypass team supervision or the execution engine.
