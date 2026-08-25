@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Who owns session state — a survey of every writer of sessions.db</title>
+<style>
+:root{--font-body:Inter,Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-display:Inter,Inter,system-ui,sans-serif;--font-mono:"JetBrains Mono","JetBrains Mono","SFMono-Regular",Consolas,monospace;}
+@page{margin:24px}
+:root{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;--content-width:980px;--page-padding:24px;--mobile-page-padding:16px;--hero-top:40px;--hero-bottom:28px;--section-spacing:36px;--figure-spacing:22px;--panel-padding:16px;--footer-spacing:64px;--print-margin:24px;--code:#0c0f0d;--code-text:#e7ece8;--radius:10px}
+@media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}}
+:root[data-theme="light"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}
+@media print{:root,:root[data-theme="light"],:root[data-theme="dark"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);line-height:1.6;-webkit-font-smoothing:antialiased;transition:background-color .15s ease,color .15s ease}main{width:100%;max-width:var(--content-width);min-width:0;margin:0 auto;padding:24px var(--page-padding) 80px}.document-header{display:flex;align-items:center;justify-content:flex-end;min-height:42px;border-bottom:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}.header-label{min-width:0;margin-right:auto;padding-right:12px;overflow-wrap:anywhere;color:var(--text);font-weight:650}.theme-toggle{display:inline-flex;flex:0 0 auto;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font:500 12px/1 var(--font-mono);cursor:pointer}.theme-toggle:hover{color:var(--accent);border-color:var(--accent)}.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.hero{padding:var(--hero-top) 0 var(--hero-bottom);border-bottom:1px solid var(--line)}.kicker{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-family:var(--font-mono);font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-weight:500}.kicker-part{color:var(--accent)}.kicker-separator{color:var(--muted);padding:0 2px}.status-badge{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn);font-family:var(--font-mono);font-size:10.5px;font-weight:650;letter-spacing:.1em;text-transform:uppercase;line-height:1}.status-badge.status-implementing,.status-badge.status-in-progress,.status-badge.status-review,.status-badge.status-done,.status-badge.status-complete{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}.hero h1{font-family:var(--font-display);font-size:clamp(30px,4vw,44px);line-height:1.1;margin:12px 0 14px;letter-spacing:-.01em}.summary{max-width:760px;color:var(--muted);font-size:17px;margin:0}.meta{display:grid;gap:14px;margin-top:20px}.facts-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.meta-block{display:grid;gap:8px}.meta-label{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}.meta-row{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}.chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 11px;color:var(--muted);font-family:var(--font-mono);font-size:11.5px;line-height:1.5}.chip-value{color:var(--text);overflow-wrap:anywhere}.chip-icon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;fill:currentColor;flex:0 0 auto}.chip-favicon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;border-radius:2px;object-fit:contain;flex:0 0 auto}.chip-value a{color:inherit;text-decoration:none}.chip-value a:hover{text-decoration:underline}.provenance-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.provenance-line a{color:var(--accent-alt);text-decoration:none}.provenance-line a:hover{text-decoration:underline}.provenance-part{color:var(--muted)}.meta-sep{margin:0 7px;opacity:.45}.toc{display:grid;gap:5px;margin:24px 0 8px;font-family:var(--font-mono);font-size:13px}.code-diff{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--code)}.code-diff-pre{margin:0;padding:10px 0;background:none;border:none;border-radius:0;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.55;color:var(--code-text)}.cd-line{display:block;white-space:pre;padding:0 14px}.cd-sign{display:inline-block;width:1.4ch;color:var(--muted);user-select:none}.cd-add{background:color-mix(in srgb,var(--accent) 15%,transparent)}.cd-add .cd-sign{color:var(--accent)}.cd-del{background:color-mix(in srgb,var(--danger) 15%,transparent)}.cd-del .cd-sign{color:var(--danger)}.cd-hunk,.cd-meta{color:var(--muted);opacity:.8}.code-diff>summary{list-style:none;cursor:pointer;padding:8px 14px;font-family:var(--font-mono);font-size:12px;color:var(--code-text);background:color-mix(in srgb,var(--code-text) 8%,var(--code));border-bottom:1px solid transparent;user-select:none}.code-diff[open]>summary{border-bottom-color:color-mix(in srgb,var(--code-text) 15%,transparent)}.code-diff>summary::-webkit-details-marker{display:none}.code-diff>summary::before{content:"\25B8";display:inline-block;margin-right:7px;color:color-mix(in srgb,var(--code-text) 55%,transparent);font-size:10px;transition:transform .12s ease}.code-diff[open]>summary::before{transform:rotate(90deg)}.checklist{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.checklist-head{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:10px}.checklist-items{list-style:none;margin:0;padding:0;display:grid;gap:7px}.cl-item{display:flex;align-items:baseline;gap:9px}.cl-box{flex:0 0 auto;font-family:var(--font-mono);font-size:.95em}.cl-done .cl-box{color:var(--accent)}.cl-todo .cl-box{color:var(--muted)}.cl-doing .cl-box{color:var(--warn)}.cl-done .cl-text{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}.toc a{color:var(--muted);text-decoration:none}.toc a:hover{color:var(--accent)}.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.toc-index{color:var(--accent);font-family:var(--font-mono);font-size:.9em}.artifact-body{min-width:0;padding-top:18px;counter-reset:section}h2{font-size:24px;margin:var(--section-spacing) 0 12px;line-height:1.2;letter-spacing:-.01em}.artifact-body>h2{counter-increment:section}.artifact-body>h2::before{content:counter(section,decimal-leading-zero);font-family:var(--font-mono);font-size:.62em;color:var(--accent);margin-right:10px;opacity:.85}h3{font-size:17px;margin:calc(var(--section-spacing) * .78) 0 10px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}p,li,dd,figcaption{overflow-wrap:anywhere}pre{background:var(--code);color:var(--code-text);padding:var(--panel-padding);border-radius:12px;overflow:auto;border:1px solid var(--line)}code{font-family:var(--font-mono);font-size:.88em;background:var(--surface-alt);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--accent-alt)}pre code{background:none;border:none;padding:0;color:inherit}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}blockquote{border-left:3px solid var(--accent);padding-left:var(--panel-padding);color:var(--muted);margin-left:0}img{display:block;max-width:100%;height:auto}svg{max-width:100%;height:auto}.artifact-body>p>img{margin:var(--figure-spacing) auto}.artifact-grid{display:grid;gap:var(--panel-padding);margin:var(--figure-spacing) 0}.artifact-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}.artifact-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.artifact-panel,.artifact-stat{min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.artifact-panel h3{margin:10px 0 8px;font-size:16px}.artifact-stat-value,.artifact-stat-label{display:block}.artifact-stat-value{color:var(--text);font-family:var(--font-display);font-size:24px;line-height:1.15}.artifact-stat-label{margin-top:6px;color:var(--muted);font-size:13px}.artifact-tag{display:inline-block;--tag-color:var(--muted);background:color-mix(in srgb,var(--tag-color) 12%,transparent);border:1px solid color-mix(in srgb,var(--tag-color) 30%,transparent);border-radius:6px;padding:2px 8px;color:var(--tag-color);font-family:var(--font-mono);font-size:11px;font-weight:600;text-transform:uppercase}.artifact-tag-accent{--tag-color:var(--accent)}.artifact-callout{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;background:var(--surface-alt);padding:var(--panel-padding)}.artifact-callout-warn{border-left-color:var(--warn)}.artifact-callout-danger{border-left-color:var(--danger)}.artifact-callout strong{color:var(--text)}.artifact-figure{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding);overflow-x:auto}.artifact-figure>img,.artifact-image{width:auto;max-width:100%;height:auto;margin:0 auto}.artifact-figure-diagram{background:#0e120f;border-color:#26302a}.artifact-diagram{display:block;width:100%;height:auto;margin:0 auto}.artifact-figure-tall{width:100%;max-width:394px;margin-left:auto;margin-right:auto}.artifact-figure figcaption{margin-top:12px;color:var(--muted);font-family:var(--font-mono);font-size:12px;text-align:center}.artifact-figure.artifact-figure-diagram figcaption{color:#8b938c}.artifact-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:12px 0;color:var(--muted);font-family:var(--font-mono);font-size:11.5px}.artifact-behavior{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;display:grid;grid-template-columns:1fr 1fr}.artifact-behavior-panel{padding:var(--panel-padding);background:var(--surface)}.artifact-behavior-panel+.artifact-behavior-panel{border-left:1px solid var(--line)}.artifact-behavior-panel::before{display:block;font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:500;margin-bottom:8px;content:""}.artifact-behavior-panel[data-state="current"]::before{content:"Current"}.artifact-behavior-panel[data-state="proposed"]{background:color-mix(in srgb,var(--accent) 6%,var(--surface))}.artifact-behavior-panel[data-state="proposed"]::before{content:"Proposed";color:var(--accent)}.document-footer{margin-top:var(--footer-spacing);padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}
+@media(max-width:720px){main{padding:32px var(--mobile-page-padding) 64px}.artifact-grid-2,.artifact-grid-3{grid-template-columns:1fr}.artifact-figure{padding:min(12px,var(--panel-padding))}.artifact-figure-wide .artifact-diagram{min-width:640px}.artifact-behavior{grid-template-columns:1fr}.artifact-behavior-panel+.artifact-behavior-panel{border-left:none;border-top:1px solid var(--line)}table{display:block;max-width:100%;overflow-x:auto}th,td{min-width:140px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}}
+@media print{body{transition:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}.toc,.theme-toggle{display:none}.document-header-empty{display:none}main{max-width:none;padding:0}:root[data-pdf-layout="poster"] main{max-width:var(--content-width);margin:0 auto;padding:var(--print-margin)}.chip{background:var(--surface)}.chip-value{color:var(--text)}.provenance-line,.provenance-line a,.facts-line{color:var(--text)}.status-badge{color:var(--text);border-color:var(--line)}h2,h3{break-after:avoid-page}.artifact-figure,.artifact-grid,.artifact-panel,.artifact-stat,.artifact-callout,.artifact-behavior,pre,table,blockquote,.meta{break-inside:avoid}.artifact-figure-wide .artifact-diagram{min-width:0}.artifact-figure-tall{max-width:330px}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--text);text-decoration:underline}}
+</style>
+</head>
+<body>
+<main>
+<header class="document-header"><div class="header-label">AGI CLI · session ownership</div><button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false" title="Toggle color theme"><span aria-hidden="true">&#9680;</span> theme</button></header>
+<section class="hero">
+<div class="kicker"><span class="kicker-part">agents-cli</span><span class="kicker-separator" aria-hidden="true">&middot;</span><span class="kicker-part">report</span><span class="status-badge status-draft">draft</span></div>
+<h1>Who owns session state — a survey of every writer of sessions.db</h1>
+<p class="summary">The write API is single and properly locked. Ownership is not: 28 files trigger the scanner, 8 modules write session rows, and the daemon is one participant rather than the owner. Nothing owns creation, and nothing owns &quot;is this still alive&quot;.</p>
+<div class="meta" aria-label="Artifact metadata"><p class="facts-line">db.ts is a single write API — 76 write statements, WAL, busy_timeout, BEGIN IMMEDIATE, a scan claim<span class="meta-sep" aria-hidden="true">·</span>28 non-test files call discoverSessions, the scanner that upserts the index<span class="meta-sep" aria-hidden="true">·</span>8 production modules write session rows; 27 import the db API<span class="meta-sep" aria-hidden="true">·</span>The daemon warms the index every 20s and active sessions every 15s — it is a real scheduler already<span class="meta-sep" aria-hidden="true">·</span>No module owns session CREATION: hosts, cloud and fork each register rows independently</p><div class="meta-block meta-links"><div class="meta-label">Related</div><ul class="meta-row meta-row-links"><li class="chip"><span class="chip-value"><svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><a href="https://linear.app/prix/issue/RUSH-3125" target="_blank" rel="noopener">RUSH-3125</a></span></li></ul></div><p class="provenance-line" aria-label="Provenance"><span class="provenance-part"><a href="https://github.com/phnx-labs/agents-cli" target="_blank" rel="noopener">phnx-labs/agents-cli</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">plan/reconnect-architecture</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">RUSH-3125</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Claude</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Muqsit</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">zion</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part"><a href="agents://session/e9b853bc">e9b853bc</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">2026-08-25</span></p></div>
+</section>
+<nav class="toc" aria-label="Artifact sections"><a href="#summary"><span class="toc-index">01&nbsp;&middot;&nbsp;</span>Summary</a><a href="#findings"><span class="toc-index">02&nbsp;&middot;&nbsp;</span>Findings</a><a href="#evidence"><span class="toc-index">03&nbsp;&middot;&nbsp;</span>Evidence</a><a href="#recommendation"><span class="toc-index">04&nbsp;&middot;&nbsp;</span>Recommendation</a></nav><article class="artifact-body"><h2 id="summary">Summary</h2>
+<p>Your instinct is right, but the problem is not the one it sounds like. There <strong>is</strong> a
+single write API and it is properly concurrency-controlled — this is not a free-for-all
+of raw SQL. What is missing is <strong>ownership</strong>: the index is maintained as a side effect of
+whichever command you happen to run, the daemon is one participant among ~28 rather than
+the authority, and two responsibilities have no owner at all — session <strong>creation</strong> and
+<strong>"is this still alive"</strong>.</p>
+<aside class="artifact-callout"><strong>Method correction, because it matters:</strong>
+my first pass through this used <code>grep</code>, which is aliased to <code>ugrep</code>
+on this box and was silently returning empty where it should have returned <code>0</code>.
+That produced a false finding — that <code>discover.ts</code> bypasses <code>db.ts</code>
+and writes raw SQL. It does not; it imports the API and calls
+<code>upsertSessionsBatch</code>. Everything below was re-derived with Python and is
+counted, not eyeballed.</aside><h2 id="findings">Findings</h2>
+<h3>The write API is single, and it is defended</h3>
+<p><code>lib/session/db.ts</code> is the only module with SQL against <code>sessions.db</code> — <strong>76 write
+statements</strong>. It carries real concurrency control, not hope:</p>
+<table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Count</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>BEGIN IMMEDIATE</code></td>
+<td>2</td>
+</tr>
+<tr>
+<td><code>busy_timeout</code></td>
+<td>4</td>
+</tr>
+<tr>
+<td>WAL mode</td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>SCAN_CLAIM</code></td>
+<td>3</td>
+</tr>
+</tbody></table>
+<p>And <code>discover.ts</code> — the scanner — carries 18 <code>claim</code> and 27 <code>lock</code> references, plus 7
+mentions of concurrency. Multiple writers were anticipated and guarded.</p>
+<p><strong>So the thing to fix is not data corruption.</strong> It is that nobody is in charge.</p>
+<h3>Ownership is diffuse — the index is a side effect</h3>
+<p>Counted across the tree, excluding tests and benches:</p>
+<table>
+<thead>
+<tr>
+<th>Measure</th>
+<th>Count</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Files calling <code>discoverSessions</code> (the scanner that upserts)</td>
+<td><strong>28</strong></td>
+</tr>
+<tr>
+<td>Modules importing the sessions db API</td>
+<td><strong>27</strong></td>
+</tr>
+<tr>
+<td>Production modules that write session rows</td>
+<td><strong>8</strong></td>
+</tr>
+</tbody></table>
+<p>Every one of those 28 call sites refreshes the index as a byproduct of doing something
+else — <code>focus</code>, <code>resume</code>, <code>render</code>, <code>output</code>, <code>insights</code>, <code>trace</code>, <code>browser</code>, <code>go</code>,
+<code>cost</code>, <code>export</code>, <code>migrate</code>, <code>logs</code>, <code>feed</code>, <code>teams</code>. Run <code>agents sessions render</code> and you
+pay for a scan. Run nothing, and the index only stays fresh because the daemon happens to
+be ticking.</p>
+<p>The eight modules that write session rows:</p>
+<pre><code>lib/session/discover.ts        upsertSessionsBatch, recordScans, recordDirScans
+lib/hosts/session-index.ts     upsertSession          (remote --device dispatch)
+lib/cloud/session-index.ts     upsertSession          (cloud runs)
+lib/session/fork.ts            upsertSession          (fork)
+commands/insights.ts           writeSessionInsights
+commands/sessions-picker.ts    writeSessionPreviewCache
+commands/sessions-backfill.ts  backfillResourceUsage
+lib/browser/service.ts +
+lib/computer/actions.ts        recordBrowserSession / recordComputerSession
+</code></pre>
+<p>Note the top four: <strong>session creation has no single entry point.</strong> A remote dispatch, a
+cloud run, and a fork each independently decide what a new session row looks like. There
+is no <code>createSession</code> that all three go through, so any invariant about a new row — that
+it carries a machine, an origin, a launch id — has to be re-established in three places
+and can drift in three places.</p>
+<h3>The daemon already does more than I gave it credit for</h3>
+<p>From <code>lib/daemon/daemon.ts</code>, the real tick schedule:</p>
+<table>
+<thead>
+<tr>
+<th>Tick</th>
+<th>Interval</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>runActiveSessionsWarmTick</code></td>
+<td><strong>15s</strong></td>
+</tr>
+<tr>
+<td><code>runSessionIndexWarmTick</code></td>
+<td><strong>20s</strong></td>
+</tr>
+<tr>
+<td><code>runWatchdogTick</code></td>
+<td>3 min</td>
+</tr>
+<tr>
+<td><code>runDeviceProbeTick</code></td>
+<td>3 min</td>
+</tr>
+<tr>
+<td><code>runMonitorTick</code></td>
+<td>60s</td>
+</tr>
+<tr>
+<td><code>reapDeadTmuxPanes</code></td>
+<td>5 min</td>
+</tr>
+<tr>
+<td><code>reapAbandoned</code> (browser tasks)</td>
+<td>5 min</td>
+</tr>
+<tr>
+<td><code>reapOrphanedKeychainProcesses</code></td>
+<td>5 min</td>
+</tr>
+<tr>
+<td><code>reapOrphanedProcesses</code></td>
+<td>5 min</td>
+</tr>
+<tr>
+<td>self-heal</td>
+<td>6 h</td>
+</tr>
+</tbody></table>
+<p>It is already a real per-device scheduler with a pid claim that stops it double-firing.
+It warms the index every 20 seconds. So "the daemon does nothing" would be wrong.</p>
+<p><strong>But warming is not owning.</strong> The daemon runs the same scanner every command runs, on a
+timer. It is participant #1 of 28, not the authority. Concretely, that means:</p>
+<ul>
+<li>the same scan work is paid many times over, by whoever happens to invoke a command</li>
+<li>freshness depends on the claim/lock layer arbitrating a crowd, rather than on there
+being one writer</li>
+<li>there is no single place to add an invariant, a repair, or a state transition, because
+there is no single place that owns the transition</li>
+</ul>
+<h3>What has no owner at all</h3>
+<p>Three responsibilities, each currently nobody's:</p>
+<ol>
+<li><strong>Creation.</strong> Three independent registrars (hosts / cloud / fork). No shared contract.</li>
+<li><strong>Liveness.</strong> The watchdog covers <strong>stalled</strong> (alive, not progressing). Nothing covers
+<strong>detached</strong> — alive with no client attached. That is the reconnect gap from RUSH-3180,
+seen from the data side: there is no state to write even if something noticed.</li>
+<li><strong>Boot.</strong> Nothing reconciles at daemon start. After a reboot, sessions that were
+running on peers are still running — and no pass exists to find them, mark them, or
+surface them.</li>
+</ol>
+<h2 id="evidence">Evidence</h2>
+<p>Counts produced by walking the tree in Python (excluding <code>*.test.ts</code>, <code>*.bench.ts</code>,
+<code>node_modules</code>, <code>dist</code>), resolving each write function to its production callers:</p>
+<pre><code>=== production callers of each WRITE function ===
+  upsertSession:            lib/cloud/session-index.ts
+                            lib/hosts/session-index.ts
+                            lib/session/fork.ts
+  upsertSessionsBatch:      lib/session/discover.ts
+  recordScans:              lib/session/discover.ts
+  recordDirScans:           lib/session/discover.ts
+  writeSessionInsights:     commands/insights.ts
+  writeSessionPreviewCache: commands/sessions-picker.ts
+  backfillResourceUsage:    commands/sessions-backfill.ts
+  updateSessionFilePaths:   commands/versions.ts
+                            lib/installations/shims.ts
+                            lib/installations/versions.ts
+  recordBrowserSession:     lib/browser/service.ts
+  recordComputerSession:    lib/computer/actions.ts
+</code></pre>
+<p><code>lib/session/discover.ts</code> is 5,684 lines and holds the scan/parse/upsert path for every
+harness. It imports <code>./db.js</code> and <code>../sqlite.js</code>, and contains <strong>zero</strong> raw
+<code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code> — all persistence goes through the API.</p>
+<h2 id="recommendation">Recommendation</h2>
+<p><strong>Make the daemon the writer, and make every other path a reader or a request.</strong></p>
+<p>Not "the daemon does more ticks" — a narrowing of who may write:</p>
+<ol>
+<li><strong>One <code>createSession</code> contract.</strong> Hosts, cloud and fork call it instead of each
+building a row. That is where machine/origin/launch-id invariants get enforced once.</li>
+<li><strong>The daemon owns the scan.</strong> Commands read the index and may <em>request</em> a refresh;
+they stop scanning inline. The claim layer stays as a backstop, but stops being the
+thing correctness rests on.</li>
+<li><strong>A session state machine with an owner</strong> — <code>running</code> → <code>stalled</code> → <code>detached</code> →
+<code>done</code>/<code>orphaned</code> — where the daemon is the only writer of the transition, and every
+surface (<code>sessions</code>, Fleet, notifications) is a projection of it.</li>
+<li><strong>A boot reconciliation pass.</strong> On daemon start, probe what this device launched onto
+peers and reconcile. That is the reboot case, and it is the one where recovery is free
+and currently never happens.</li>
+<li><strong>Keep action user-initiated.</strong> The daemon writes state and offers verbs; it must not
+spawn or reopen on its own — that is the 2026-08-03 double-fire incident.</li>
+</ol>
+<p>Sequencing matters: (1) and (3) are cheap and unlock the rest. (2) is the invasive one —
+28 call sites — and should follow, not lead.</p>
+</article>
+<footer class="document-footer">Phoenix Labs</footer>
+</main>
+<script type="application/json" id="artifacts-source">{"encoding":"base64","markdown":"LS0tCmtpbmQ6IHJlcG9ydAp0ZW1wbGF0ZTogcmVwb3J0LnYxCnRpdGxlOiBXaG8gb3ducyBzZXNzaW9uIHN0YXRlIOKAlCBhIHN1cnZleSBvZiBldmVyeSB3cml0ZXIgb2Ygc2Vzc2lvbnMuZGIKc3VtbWFyeTogPi0KICBUaGUgd3JpdGUgQVBJIGlzIHNpbmdsZSBhbmQgcHJvcGVybHkgbG9ja2VkLiBPd25lcnNoaXAgaXMgbm90OiAyOCBmaWxlcyB0cmlnZ2VyIHRoZQogIHNjYW5uZXIsIDggbW9kdWxlcyB3cml0ZSBzZXNzaW9uIHJvd3MsIGFuZCB0aGUgZGFlbW9uIGlzIG9uZSBwYXJ0aWNpcGFudCByYXRoZXIgdGhhbgogIHRoZSBvd25lci4gTm90aGluZyBvd25zIGNyZWF0aW9uLCBhbmQgbm90aGluZyBvd25zICJpcyB0aGlzIHN0aWxsIGFsaXZlIi4KaGVhZGVyOiBBR0kgQ0xJIMK3IHNlc3Npb24gb3duZXJzaGlwCmZvb3RlcjogUGhvZW5peCBMYWJzCnByb2plY3Q6IGFnZW50cy1jbGkKY29udGV4dDogPi0KICBPd25lciBhc2tlZCB3aGV0aGVyIHRoZSBkYWVtb24gc2hvdWxkIG93biBhbGwgc2Vzc2lvbiBtYW5hZ2VtZW50IOKAlCBjcmVhdGlvbiwgb3JwaGFuCiAgZGV0ZWN0aW9uLCBtZXRhZGF0YSwgc2Vzc2lvbnMuZGIgd3JpdGVzIOKAlCBhbmQgc2FpZCB0aGUgY3VycmVudCBsb2dpYyBpcyBub3Qgd2VsbAogIGltcGxlbWVudGVkLiBTdXJ2ZXllZCBmcm9tIHNvdXJjZS4KcmVwb3NpdG9yeTogcGhueC1sYWJzL2FnZW50cy1jbGkKYnJhbmNoOiBwbGFuL3JlY29ubmVjdC1hcmNoaXRlY3R1cmUKc3VyZmFjZTogY2xpCnRyYWNraW5nOiBSVVNILTMxMjUKc3RhdHVzOiBkcmFmdApoYXJuZXNzOiBjbGF1ZGUKYWdlbnQ6IGNsYXVkZQpodW1hbjogTXVxc2l0Cmhvc3Q6IHppb24Kc2Vzc2lvbjogZTliODUzYmMKZGF0ZTogJzIwMjYtMDgtMjUnCmZhY3RzOgogIC0gJ2RiLnRzIGlzIGEgc2luZ2xlIHdyaXRlIEFQSSDigJQgNzYgd3JpdGUgc3RhdGVtZW50cywgV0FMLCBidXN5X3RpbWVvdXQsIEJFR0lOIElNTUVESUFURSwgYSBzY2FuIGNsYWltJwogIC0gJzI4IG5vbi10ZXN0IGZpbGVzIGNhbGwgZGlzY292ZXJTZXNzaW9ucywgdGhlIHNjYW5uZXIgdGhhdCB1cHNlcnRzIHRoZSBpbmRleCcKICAtICc4IHByb2R1Y3Rpb24gbW9kdWxlcyB3cml0ZSBzZXNzaW9uIHJvd3M7IDI3IGltcG9ydCB0aGUgZGIgQVBJJwogIC0gJ1RoZSBkYWVtb24gd2FybXMgdGhlIGluZGV4IGV2ZXJ5IDIwcyBhbmQgYWN0aXZlIHNlc3Npb25zIGV2ZXJ5IDE1cyDigJQgaXQgaXMgYSByZWFsIHNjaGVkdWxlciBhbHJlYWR5JwogIC0gJ05vIG1vZHVsZSBvd25zIHNlc3Npb24gQ1JFQVRJT046IGhvc3RzLCBjbG91ZCBhbmQgZm9yayBlYWNoIHJlZ2lzdGVyIHJvd3MgaW5kZXBlbmRlbnRseScKbGlua3M6CiAgLSB0aXRsZTogUlVTSC0zMTI1CiAgICB1cmw6IGh0dHBzOi8vbGluZWFyLmFwcC9wcml4L2lzc3VlL1JVU0gtMzEyNQphc3NldHM6IFtdCi0tLQoKIyMgU3VtbWFyeQoKWW91ciBpbnN0aW5jdCBpcyByaWdodCwgYnV0IHRoZSBwcm9ibGVtIGlzIG5vdCB0aGUgb25lIGl0IHNvdW5kcyBsaWtlLiBUaGVyZSAqKmlzKiogYQpzaW5nbGUgd3JpdGUgQVBJIGFuZCBpdCBpcyBwcm9wZXJseSBjb25jdXJyZW5jeS1jb250cm9sbGVkIOKAlCB0aGlzIGlzIG5vdCBhIGZyZWUtZm9yLWFsbApvZiByYXcgU1FMLiBXaGF0IGlzIG1pc3NpbmcgaXMgKipvd25lcnNoaXAqKjogdGhlIGluZGV4IGlzIG1haW50YWluZWQgYXMgYSBzaWRlIGVmZmVjdCBvZgp3aGljaGV2ZXIgY29tbWFuZCB5b3UgaGFwcGVuIHRvIHJ1biwgdGhlIGRhZW1vbiBpcyBvbmUgcGFydGljaXBhbnQgYW1vbmcgfjI4IHJhdGhlciB0aGFuCnRoZSBhdXRob3JpdHksIGFuZCB0d28gcmVzcG9uc2liaWxpdGllcyBoYXZlIG5vIG93bmVyIGF0IGFsbCDigJQgc2Vzc2lvbiAqKmNyZWF0aW9uKiogYW5kCioqImlzIHRoaXMgc3RpbGwgYWxpdmUiKiouCgo8YXNpZGUgY2xhc3M9ImFydGlmYWN0LWNhbGxvdXQiPjxzdHJvbmc+TWV0aG9kIGNvcnJlY3Rpb24sIGJlY2F1c2UgaXQgbWF0dGVyczo8L3N0cm9uZz4KbXkgZmlyc3QgcGFzcyB0aHJvdWdoIHRoaXMgdXNlZCA8Y29kZT5ncmVwPC9jb2RlPiwgd2hpY2ggaXMgYWxpYXNlZCB0byA8Y29kZT51Z3JlcDwvY29kZT4Kb24gdGhpcyBib3ggYW5kIHdhcyBzaWxlbnRseSByZXR1cm5pbmcgZW1wdHkgd2hlcmUgaXQgc2hvdWxkIGhhdmUgcmV0dXJuZWQgPGNvZGU+MDwvY29kZT4uClRoYXQgcHJvZHVjZWQgYSBmYWxzZSBmaW5kaW5nIOKAlCB0aGF0IDxjb2RlPmRpc2NvdmVyLnRzPC9jb2RlPiBieXBhc3NlcyA8Y29kZT5kYi50czwvY29kZT4KYW5kIHdyaXRlcyByYXcgU1FMLiBJdCBkb2VzIG5vdDsgaXQgaW1wb3J0cyB0aGUgQVBJIGFuZCBjYWxscwo8Y29kZT51cHNlcnRTZXNzaW9uc0JhdGNoPC9jb2RlPi4gRXZlcnl0aGluZyBiZWxvdyB3YXMgcmUtZGVyaXZlZCB3aXRoIFB5dGhvbiBhbmQgaXMKY291bnRlZCwgbm90IGV5ZWJhbGxlZC48L2FzaWRlPgoKIyMgRmluZGluZ3MKCiMjIyBUaGUgd3JpdGUgQVBJIGlzIHNpbmdsZSwgYW5kIGl0IGlzIGRlZmVuZGVkCgpgbGliL3Nlc3Npb24vZGIudHNgIGlzIHRoZSBvbmx5IG1vZHVsZSB3aXRoIFNRTCBhZ2FpbnN0IGBzZXNzaW9ucy5kYmAg4oCUICoqNzYgd3JpdGUKc3RhdGVtZW50cyoqLiBJdCBjYXJyaWVzIHJlYWwgY29uY3VycmVuY3kgY29udHJvbCwgbm90IGhvcGU6Cgp8IE1lY2hhbmlzbSB8IENvdW50IHwKfCAtLS0gfCAtLS0gfAp8IGBCRUdJTiBJTU1FRElBVEVgIHwgMiB8CnwgYGJ1c3lfdGltZW91dGAgfCA0IHwKfCBXQUwgbW9kZSB8IDMgfAp8IGBTQ0FOX0NMQUlNYCB8IDMgfAoKQW5kIGBkaXNjb3Zlci50c2Ag4oCUIHRoZSBzY2FubmVyIOKAlCBjYXJyaWVzIDE4IGBjbGFpbWAgYW5kIDI3IGBsb2NrYCByZWZlcmVuY2VzLCBwbHVzIDcKbWVudGlvbnMgb2YgY29uY3VycmVuY3kuIE11bHRpcGxlIHdyaXRlcnMgd2VyZSBhbnRpY2lwYXRlZCBhbmQgZ3VhcmRlZC4KCioqU28gdGhlIHRoaW5nIHRvIGZpeCBpcyBub3QgZGF0YSBjb3JydXB0aW9uLioqIEl0IGlzIHRoYXQgbm9ib2R5IGlzIGluIGNoYXJnZS4KCiMjIyBPd25lcnNoaXAgaXMgZGlmZnVzZSDigJQgdGhlIGluZGV4IGlzIGEgc2lkZSBlZmZlY3QKCkNvdW50ZWQgYWNyb3NzIHRoZSB0cmVlLCBleGNsdWRpbmcgdGVzdHMgYW5kIGJlbmNoZXM6Cgp8IE1lYXN1cmUgfCBDb3VudCB8CnwgLS0tIHwgLS0tIHwKfCBGaWxlcyBjYWxsaW5nIGBkaXNjb3ZlclNlc3Npb25zYCAodGhlIHNjYW5uZXIgdGhhdCB1cHNlcnRzKSB8ICoqMjgqKiB8CnwgTW9kdWxlcyBpbXBvcnRpbmcgdGhlIHNlc3Npb25zIGRiIEFQSSB8ICoqMjcqKiB8CnwgUHJvZHVjdGlvbiBtb2R1bGVzIHRoYXQgd3JpdGUgc2Vzc2lvbiByb3dzIHwgKio4KiogfAoKRXZlcnkgb25lIG9mIHRob3NlIDI4IGNhbGwgc2l0ZXMgcmVmcmVzaGVzIHRoZSBpbmRleCBhcyBhIGJ5cHJvZHVjdCBvZiBkb2luZyBzb21ldGhpbmcKZWxzZSDigJQgYGZvY3VzYCwgYHJlc3VtZWAsIGByZW5kZXJgLCBgb3V0cHV0YCwgYGluc2lnaHRzYCwgYHRyYWNlYCwgYGJyb3dzZXJgLCBgZ29gLApgY29zdGAsIGBleHBvcnRgLCBgbWlncmF0ZWAsIGBsb2dzYCwgYGZlZWRgLCBgdGVhbXNgLiBSdW4gYGFnZW50cyBzZXNzaW9ucyByZW5kZXJgIGFuZCB5b3UKcGF5IGZvciBhIHNjYW4uIFJ1biBub3RoaW5nLCBhbmQgdGhlIGluZGV4IG9ubHkgc3RheXMgZnJlc2ggYmVjYXVzZSB0aGUgZGFlbW9uIGhhcHBlbnMgdG8KYmUgdGlja2luZy4KClRoZSBlaWdodCBtb2R1bGVzIHRoYXQgd3JpdGUgc2Vzc2lvbiByb3dzOgoKYGBgCmxpYi9zZXNzaW9uL2Rpc2NvdmVyLnRzICAgICAgICB1cHNlcnRTZXNzaW9uc0JhdGNoLCByZWNvcmRTY2FucywgcmVjb3JkRGlyU2NhbnMKbGliL2hvc3RzL3Nlc3Npb24taW5kZXgudHMgICAgIHVwc2VydFNlc3Npb24gICAgICAgICAgKHJlbW90ZSAtLWRldmljZSBkaXNwYXRjaCkKbGliL2Nsb3VkL3Nlc3Npb24taW5kZXgudHMgICAgIHVwc2VydFNlc3Npb24gICAgICAgICAgKGNsb3VkIHJ1bnMpCmxpYi9zZXNzaW9uL2ZvcmsudHMgICAgICAgICAgICB1cHNlcnRTZXNzaW9uICAgICAgICAgIChmb3JrKQpjb21tYW5kcy9pbnNpZ2h0cy50cyAgICAgICAgICAgd3JpdGVTZXNzaW9uSW5zaWdodHMKY29tbWFuZHMvc2Vzc2lvbnMtcGlja2VyLnRzICAgIHdyaXRlU2Vzc2lvblByZXZpZXdDYWNoZQpjb21tYW5kcy9zZXNzaW9ucy1iYWNrZmlsbC50cyAgYmFja2ZpbGxSZXNvdXJjZVVzYWdlCmxpYi9icm93c2VyL3NlcnZpY2UudHMgKwpsaWIvY29tcHV0ZXIvYWN0aW9ucy50cyAgICAgICAgcmVjb3JkQnJvd3NlclNlc3Npb24gLyByZWNvcmRDb21wdXRlclNlc3Npb24KYGBgCgpOb3RlIHRoZSB0b3AgZm91cjogKipzZXNzaW9uIGNyZWF0aW9uIGhhcyBubyBzaW5nbGUgZW50cnkgcG9pbnQuKiogQSByZW1vdGUgZGlzcGF0Y2gsIGEKY2xvdWQgcnVuLCBhbmQgYSBmb3JrIGVhY2ggaW5kZXBlbmRlbnRseSBkZWNpZGUgd2hhdCBhIG5ldyBzZXNzaW9uIHJvdyBsb29rcyBsaWtlLiBUaGVyZQppcyBubyBgY3JlYXRlU2Vzc2lvbmAgdGhhdCBhbGwgdGhyZWUgZ28gdGhyb3VnaCwgc28gYW55IGludmFyaWFudCBhYm91dCBhIG5ldyByb3cg4oCUIHRoYXQKaXQgY2FycmllcyBhIG1hY2hpbmUsIGFuIG9yaWdpbiwgYSBsYXVuY2ggaWQg4oCUIGhhcyB0byBiZSByZS1lc3RhYmxpc2hlZCBpbiB0aHJlZSBwbGFjZXMKYW5kIGNhbiBkcmlmdCBpbiB0aHJlZSBwbGFjZXMuCgojIyMgVGhlIGRhZW1vbiBhbHJlYWR5IGRvZXMgbW9yZSB0aGFuIEkgZ2F2ZSBpdCBjcmVkaXQgZm9yCgpGcm9tIGBsaWIvZGFlbW9uL2RhZW1vbi50c2AsIHRoZSByZWFsIHRpY2sgc2NoZWR1bGU6Cgp8IFRpY2sgfCBJbnRlcnZhbCB8CnwgLS0tIHwgLS0tIHwKfCBgcnVuQWN0aXZlU2Vzc2lvbnNXYXJtVGlja2AgfCAqKjE1cyoqIHwKfCBgcnVuU2Vzc2lvbkluZGV4V2FybVRpY2tgIHwgKioyMHMqKiB8CnwgYHJ1bldhdGNoZG9nVGlja2AgfCAzIG1pbiB8CnwgYHJ1bkRldmljZVByb2JlVGlja2AgfCAzIG1pbiB8CnwgYHJ1bk1vbml0b3JUaWNrYCB8IDYwcyB8CnwgYHJlYXBEZWFkVG11eFBhbmVzYCB8IDUgbWluIHwKfCBgcmVhcEFiYW5kb25lZGAgKGJyb3dzZXIgdGFza3MpIHwgNSBtaW4gfAp8IGByZWFwT3JwaGFuZWRLZXljaGFpblByb2Nlc3Nlc2AgfCA1IG1pbiB8CnwgYHJlYXBPcnBoYW5lZFByb2Nlc3Nlc2AgfCA1IG1pbiB8Cnwgc2VsZi1oZWFsIHwgNiBoIHwKCkl0IGlzIGFscmVhZHkgYSByZWFsIHBlci1kZXZpY2Ugc2NoZWR1bGVyIHdpdGggYSBwaWQgY2xhaW0gdGhhdCBzdG9wcyBpdCBkb3VibGUtZmlyaW5nLgpJdCB3YXJtcyB0aGUgaW5kZXggZXZlcnkgMjAgc2Vjb25kcy4gU28gInRoZSBkYWVtb24gZG9lcyBub3RoaW5nIiB3b3VsZCBiZSB3cm9uZy4KCioqQnV0IHdhcm1pbmcgaXMgbm90IG93bmluZy4qKiBUaGUgZGFlbW9uIHJ1bnMgdGhlIHNhbWUgc2Nhbm5lciBldmVyeSBjb21tYW5kIHJ1bnMsIG9uIGEKdGltZXIuIEl0IGlzIHBhcnRpY2lwYW50ICMxIG9mIDI4LCBub3QgdGhlIGF1dGhvcml0eS4gQ29uY3JldGVseSwgdGhhdCBtZWFuczoKCi0gdGhlIHNhbWUgc2NhbiB3b3JrIGlzIHBhaWQgbWFueSB0aW1lcyBvdmVyLCBieSB3aG9ldmVyIGhhcHBlbnMgdG8gaW52b2tlIGEgY29tbWFuZAotIGZyZXNobmVzcyBkZXBlbmRzIG9uIHRoZSBjbGFpbS9sb2NrIGxheWVyIGFyYml0cmF0aW5nIGEgY3Jvd2QsIHJhdGhlciB0aGFuIG9uIHRoZXJlCiAgYmVpbmcgb25lIHdyaXRlcgotIHRoZXJlIGlzIG5vIHNpbmdsZSBwbGFjZSB0byBhZGQgYW4gaW52YXJpYW50LCBhIHJlcGFpciwgb3IgYSBzdGF0ZSB0cmFuc2l0aW9uLCBiZWNhdXNlCiAgdGhlcmUgaXMgbm8gc2luZ2xlIHBsYWNlIHRoYXQgb3ducyB0aGUgdHJhbnNpdGlvbgoKIyMjIFdoYXQgaGFzIG5vIG93bmVyIGF0IGFsbAoKVGhyZWUgcmVzcG9uc2liaWxpdGllcywgZWFjaCBjdXJyZW50bHkgbm9ib2R5J3M6CgoxLiAqKkNyZWF0aW9uLioqIFRocmVlIGluZGVwZW5kZW50IHJlZ2lzdHJhcnMgKGhvc3RzIC8gY2xvdWQgLyBmb3JrKS4gTm8gc2hhcmVkIGNvbnRyYWN0LgoyLiAqKkxpdmVuZXNzLioqIFRoZSB3YXRjaGRvZyBjb3ZlcnMgKipzdGFsbGVkKiogKGFsaXZlLCBub3QgcHJvZ3Jlc3NpbmcpLiBOb3RoaW5nIGNvdmVycwogICAqKmRldGFjaGVkKiog4oCUIGFsaXZlIHdpdGggbm8gY2xpZW50IGF0dGFjaGVkLiBUaGF0IGlzIHRoZSByZWNvbm5lY3QgZ2FwIGZyb20gUlVTSC0zMTgwLAogICBzZWVuIGZyb20gdGhlIGRhdGEgc2lkZTogdGhlcmUgaXMgbm8gc3RhdGUgdG8gd3JpdGUgZXZlbiBpZiBzb21ldGhpbmcgbm90aWNlZC4KMy4gKipCb290LioqIE5vdGhpbmcgcmVjb25jaWxlcyBhdCBkYWVtb24gc3RhcnQuIEFmdGVyIGEgcmVib290LCBzZXNzaW9ucyB0aGF0IHdlcmUKICAgcnVubmluZyBvbiBwZWVycyBhcmUgc3RpbGwgcnVubmluZyDigJQgYW5kIG5vIHBhc3MgZXhpc3RzIHRvIGZpbmQgdGhlbSwgbWFyayB0aGVtLCBvcgogICBzdXJmYWNlIHRoZW0uCgojIyBFdmlkZW5jZQoKQ291bnRzIHByb2R1Y2VkIGJ5IHdhbGtpbmcgdGhlIHRyZWUgaW4gUHl0aG9uIChleGNsdWRpbmcgYCoudGVzdC50c2AsIGAqLmJlbmNoLnRzYCwKYG5vZGVfbW9kdWxlc2AsIGBkaXN0YCksIHJlc29sdmluZyBlYWNoIHdyaXRlIGZ1bmN0aW9uIHRvIGl0cyBwcm9kdWN0aW9uIGNhbGxlcnM6CgpgYGAKPT09IHByb2R1Y3Rpb24gY2FsbGVycyBvZiBlYWNoIFdSSVRFIGZ1bmN0aW9uID09PQogIHVwc2VydFNlc3Npb246ICAgICAgICAgICAgbGliL2Nsb3VkL3Nlc3Npb24taW5kZXgudHMKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxpYi9ob3N0cy9zZXNzaW9uLWluZGV4LnRzCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsaWIvc2Vzc2lvbi9mb3JrLnRzCiAgdXBzZXJ0U2Vzc2lvbnNCYXRjaDogICAgICBsaWIvc2Vzc2lvbi9kaXNjb3Zlci50cwogIHJlY29yZFNjYW5zOiAgICAgICAgICAgICAgbGliL3Nlc3Npb24vZGlzY292ZXIudHMKICByZWNvcmREaXJTY2FuczogICAgICAgICAgIGxpYi9zZXNzaW9uL2Rpc2NvdmVyLnRzCiAgd3JpdGVTZXNzaW9uSW5zaWdodHM6ICAgICBjb21tYW5kcy9pbnNpZ2h0cy50cwogIHdyaXRlU2Vzc2lvblByZXZpZXdDYWNoZTogY29tbWFuZHMvc2Vzc2lvbnMtcGlja2VyLnRzCiAgYmFja2ZpbGxSZXNvdXJjZVVzYWdlOiAgICBjb21tYW5kcy9zZXNzaW9ucy1iYWNrZmlsbC50cwogIHVwZGF0ZVNlc3Npb25GaWxlUGF0aHM6ICAgY29tbWFuZHMvdmVyc2lvbnMudHMKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGxpYi9pbnN0YWxsYXRpb25zL3NoaW1zLnRzCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsaWIvaW5zdGFsbGF0aW9ucy92ZXJzaW9ucy50cwogIHJlY29yZEJyb3dzZXJTZXNzaW9uOiAgICAgbGliL2Jyb3dzZXIvc2VydmljZS50cwogIHJlY29yZENvbXB1dGVyU2Vzc2lvbjogICAgbGliL2NvbXB1dGVyL2FjdGlvbnMudHMKYGBgCgpgbGliL3Nlc3Npb24vZGlzY292ZXIudHNgIGlzIDUsNjg0IGxpbmVzIGFuZCBob2xkcyB0aGUgc2Nhbi9wYXJzZS91cHNlcnQgcGF0aCBmb3IgZXZlcnkKaGFybmVzcy4gSXQgaW1wb3J0cyBgLi9kYi5qc2AgYW5kIGAuLi9zcWxpdGUuanNgLCBhbmQgY29udGFpbnMgKip6ZXJvKiogcmF3CmBJTlNFUlRgL2BVUERBVEVgL2BERUxFVEVgIOKAlCBhbGwgcGVyc2lzdGVuY2UgZ29lcyB0aHJvdWdoIHRoZSBBUEkuCgojIyBSZWNvbW1lbmRhdGlvbgoKKipNYWtlIHRoZSBkYWVtb24gdGhlIHdyaXRlciwgYW5kIG1ha2UgZXZlcnkgb3RoZXIgcGF0aCBhIHJlYWRlciBvciBhIHJlcXVlc3QuKioKCk5vdCAidGhlIGRhZW1vbiBkb2VzIG1vcmUgdGlja3MiIOKAlCBhIG5hcnJvd2luZyBvZiB3aG8gbWF5IHdyaXRlOgoKMS4gKipPbmUgYGNyZWF0ZVNlc3Npb25gIGNvbnRyYWN0LioqIEhvc3RzLCBjbG91ZCBhbmQgZm9yayBjYWxsIGl0IGluc3RlYWQgb2YgZWFjaAogICBidWlsZGluZyBhIHJvdy4gVGhhdCBpcyB3aGVyZSBtYWNoaW5lL29yaWdpbi9sYXVuY2gtaWQgaW52YXJpYW50cyBnZXQgZW5mb3JjZWQgb25jZS4KMi4gKipUaGUgZGFlbW9uIG93bnMgdGhlIHNjYW4uKiogQ29tbWFuZHMgcmVhZCB0aGUgaW5kZXggYW5kIG1heSAqcmVxdWVzdCogYSByZWZyZXNoOwogICB0aGV5IHN0b3Agc2Nhbm5pbmcgaW5saW5lLiBUaGUgY2xhaW0gbGF5ZXIgc3RheXMgYXMgYSBiYWNrc3RvcCwgYnV0IHN0b3BzIGJlaW5nIHRoZQogICB0aGluZyBjb3JyZWN0bmVzcyByZXN0cyBvbi4KMy4gKipBIHNlc3Npb24gc3RhdGUgbWFjaGluZSB3aXRoIGFuIG93bmVyKiog4oCUIGBydW5uaW5nYCDihpIgYHN0YWxsZWRgIOKGkiBgZGV0YWNoZWRgIOKGkgogICBgZG9uZWAvYG9ycGhhbmVkYCDigJQgd2hlcmUgdGhlIGRhZW1vbiBpcyB0aGUgb25seSB3cml0ZXIgb2YgdGhlIHRyYW5zaXRpb24sIGFuZCBldmVyeQogICBzdXJmYWNlIChgc2Vzc2lvbnNgLCBGbGVldCwgbm90aWZpY2F0aW9ucykgaXMgYSBwcm9qZWN0aW9uIG9mIGl0Lgo0LiAqKkEgYm9vdCByZWNvbmNpbGlhdGlvbiBwYXNzLioqIE9uIGRhZW1vbiBzdGFydCwgcHJvYmUgd2hhdCB0aGlzIGRldmljZSBsYXVuY2hlZCBvbnRvCiAgIHBlZXJzIGFuZCByZWNvbmNpbGUuIFRoYXQgaXMgdGhlIHJlYm9vdCBjYXNlLCBhbmQgaXQgaXMgdGhlIG9uZSB3aGVyZSByZWNvdmVyeSBpcyBmcmVlCiAgIGFuZCBjdXJyZW50bHkgbmV2ZXIgaGFwcGVucy4KNS4gKipLZWVwIGFjdGlvbiB1c2VyLWluaXRpYXRlZC4qKiBUaGUgZGFlbW9uIHdyaXRlcyBzdGF0ZSBhbmQgb2ZmZXJzIHZlcmJzOyBpdCBtdXN0IG5vdAogICBzcGF3biBvciByZW9wZW4gb24gaXRzIG93biDigJQgdGhhdCBpcyB0aGUgMjAyNi0wOC0wMyBkb3VibGUtZmlyZSBpbmNpZGVudC4KClNlcXVlbmNpbmcgbWF0dGVyczogKDEpIGFuZCAoMykgYXJlIGNoZWFwIGFuZCB1bmxvY2sgdGhlIHJlc3QuICgyKSBpcyB0aGUgaW52YXNpdmUgb25lIOKAlAoyOCBjYWxsIHNpdGVzIOKAlCBhbmQgc2hvdWxkIGZvbGxvdywgbm90IGxlYWQuCg=="}</script>
+<script>
+(() => {
+  const root = document.documentElement;
+  const button = document.querySelector('.theme-toggle');
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  const configured = "system";
+  const stored = () => { try { const value = localStorage.getItem('artifacts-theme'); return value === 'light' || value === 'dark' ? value : null; } catch { return null; } };
+  const preferred = () => stored() || (configured === 'system' ? (media.matches ? 'dark' : 'light') : configured);
+  const apply = (theme, persist) => {
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    const next = theme === 'dark' ? 'light' : 'dark';
+    button.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+    button.setAttribute('title', 'Switch to ' + next + ' theme');
+    button.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    if (persist) { try { localStorage.setItem('artifacts-theme', theme); } catch {} }
+  };
+  apply(preferred(), false);
+  button.addEventListener('click', () => apply(root.dataset.theme === 'dark' ? 'light' : 'dark', true));
+  media.addEventListener('change', () => { if (configured === 'system' && !stored()) apply(media.matches ? 'dark' : 'light', false); });
+})();
+</script>
+</body>
+</html>
