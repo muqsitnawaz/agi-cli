@@ -342,7 +342,7 @@ describe('AgentProcess: remoteSessionId extraction', () => {
       }
     });
 
-    it('startReady does NOT launch if a dep failed', async () => {
+    it('startReady terminalizes a dependent when its dependency failed', async () => {
       const base = freshBase();
       const mgr = new AgentManager(50, base);
       const alice = await mgr.spawn('t', 'claude', 'x', null, 'plan', 'low', null, null, null, 'alice');
@@ -355,7 +355,12 @@ describe('AgentProcess: remoteSessionId extraction', () => {
       const launched = await mgr.startReady('t');
       expect(launched.some((a) => a.name === 'bob')).toBe(false);
       const bob = (await mgr.listByTask('t')).find((a) => a.name === 'bob');
-      expect(bob?.status).toBe('pending'); // blocked — user decides
+      expect(bob?.status).toBe(AgentStatus.FAILED);
+      expect(bob?.failure).toMatchObject({
+        stage: 'dependency',
+        code: 'dependency-failed',
+        retryable: false,
+      });
     });
 
     it('--model override is stored and wins over effort→model map', async () => {
