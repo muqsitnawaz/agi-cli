@@ -38,6 +38,20 @@ import { LEASE_AGENT_MARKER, leasePhaseSentinel } from './progress.js';
 import { copySetupToBox } from './setup-copy.js';
 import { DEFAULT_CRABBOX_PROFILE } from './config.js';
 
+/**
+ * Exit codes the bootstrap script uses to signal it never reached the agent:
+ * 96 = agents-cli install failed, 97 = `agents setup` failed or left
+ * `~/.agents/.system` uninitialized. The command layer maps these to an
+ * actionable message and stops a box this run provisioned (see `leaseAndRun`).
+ */
+export const LEASE_BOOTSTRAP_INSTALL_FAILED = 96;
+export const LEASE_BOOTSTRAP_SETUP_FAILED = 97;
+
+/** True when a lease exit code means bootstrap failed before the agent started. */
+export function bootstrapFailed(exitCode: number | null): boolean {
+  return exitCode === LEASE_BOOTSTRAP_INSTALL_FAILED || exitCode === LEASE_BOOTSTRAP_SETUP_FAILED;
+}
+
 /** Phase signal for a lease run, so the command layer can drive a progress UI. */
 export type LeasePhase =
   | { kind: 'warmup'; backend?: string }
@@ -187,7 +201,22 @@ const ENSURE_AGENTS_CLI = [
   'fi',
   // Same first-run guard the hosts bootstrap uses (hosts/ready.ts) — a fresh
   // install refuses `agents run` with "agents-cli is not set up" until setup ran.
-  'if [ ! -d "$HOME/.agents/.system" ]; then agents setup >/dev/null 2>&1 || true; fi',
+  // Run setup VISIBLY and fail loud: a swallowed `>/dev/null 2>&1 || true` here
+  // used to hide the real cause and surface only as "agents-cli is not set up"
+  // deep in the run, after the box was already billed. `agents setup` is
+  // non-interactive with no TTY, so no --yes is needed.
+  'if [ ! -d "$HOME/.agents/.system" ]; then',
+  '  if ! agents setup 2>&1; then',
+  '    echo "lease bootstrap: agents setup failed" >&2',
+  '    exit 97',
+  '  fi',
+  'fi',
+  // Postcondition: setup must have initialized the .system repo, else `agents
+  // run` will refuse. Assert it before installing runtimes or running the agent.
+  'if [ ! -d "$HOME/.agents/.system/.git" ]; then',
+  '  echo "lease bootstrap: setup did not initialize ~/.agents/.system" >&2',
+  '  exit 97',
+  'fi',
 ].join('\n');
 
 /**
@@ -449,6 +478,14 @@ export async function leaseAndRun(opts: LeaseRunOptions): Promise<LeaseRunResult
     // this run; credentials are still shredded inside the script above. Only
     // --fresh requests the old one-shot lifecycle and tears its new box down.
     if (!opts.keep && opts.fresh && !reused) {
+      opts.onPhase?.({ kind: 'teardown' });
+      toreDown = crabboxStop(box.slug, { secretsBundle: opts.secretsBundle });
+    } else if (!reused && !toreDown && bootstrapFailed(exitCode)) {
+      // A box THIS run provisioned that failed bootstrap (agents-cli install /
+      // setup postcondition, exit 96/97) is unusable — it will fail identically
+      // on reuse. Stop it so it doesn't sit idle-billing in the warm pool. Never
+      // auto-stop a reused box (`--box` or a warm-pool hit): the caller owns its
+      // lifecycle and it was working before this run.
       opts.onPhase?.({ kind: 'teardown' });
       toreDown = crabboxStop(box.slug, { secretsBundle: opts.secretsBundle });
     }

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as bundles from '../secrets/bundles.js';
 import * as stateModule from '../state.js';
-import { buildBootstrapScript, leaseAndRun, leaseWorkspaceId, isExpiredPoolStray, STRAY_GRACE_SECS } from './lease.js';
+import { buildBootstrapScript, leaseAndRun, leaseWorkspaceId, isExpiredPoolStray, STRAY_GRACE_SECS, bootstrapFailed, LEASE_BOOTSTRAP_INSTALL_FAILED, LEASE_BOOTSTRAP_SETUP_FAILED } from './lease.js';
 import { resetCrabboxSecretsMemosForTest, type CrabboxBox } from './cli.js';
 import { LEASE_AGENT_MARKER, leasePhaseSentinel } from './progress.js';
 import type { DetectedRuntime } from './runtimes.js';
@@ -57,6 +57,26 @@ describe('buildBootstrapScript', () => {
     expect(script).toContain('agents setup');
     // Node bootstrap runs before the credential write — never after.
     expect(script.indexOf('command -v node')).toBeLessThan(script.indexOf("agents run 'claude'"));
+  });
+
+  it('runs `agents setup` visibly and fails loud on a bad setup, never swallowed', () => {
+    const script = buildBootstrapScript({
+      agent: 'claude',
+      prompt: 'print hostname',
+      runtimes: ['claude'],
+      detected,
+    });
+    // Regression: the old `agents setup >/dev/null 2>&1 || true` swallowed the
+    // real failure and surfaced only "agents-cli is not set up" deep in the run,
+    // after the box was already billed. Setup must be visible and abort on error.
+    expect(script).not.toContain('agents setup >/dev/null 2>&1 || true');
+    expect(script).toContain('if ! agents setup 2>&1; then');
+    expect(script).toContain('exit 97');
+    // Postcondition: setup must have initialized the .system repo before the run.
+    expect(script).toContain('if [ ! -d "$HOME/.agents/.system/.git" ]; then');
+    // Both setup gates run before the agent ever starts.
+    expect(script.indexOf('agents setup')).toBeLessThan(script.indexOf("agents run 'claude'"));
+    expect(script.indexOf('.agents/.system/.git')).toBeLessThan(script.indexOf("agents run 'claude'"));
   });
 
   it('shreds the claude OAuth token file after the run, regardless of --keep-box', () => {
@@ -434,7 +454,7 @@ describe.skipIf(process.platform === 'win32')('leaseAndRun warm profile-pool reu
    * warmed marker, then serves `boxes + warmedBoxes`; `status --id <slug>`
    * reports ready=true only for `readySlugs`. Every invocation is logged.
    */
-  function setupPoolFake(opts: { boxes: unknown[]; readySlugs: string[]; warmedBoxes?: unknown[] }) {
+  function setupPoolFake(opts: { boxes: unknown[]; readySlugs: string[]; warmedBoxes?: unknown[]; runExit?: number }) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lease-pool-'));
     const log = path.join(dir, 'crabbox.log');
     const script = path.join(dir, 'remote.sh');
@@ -455,7 +475,7 @@ describe.skipIf(process.platform === 'win32')('leaseAndRun warm profile-pool reu
         '  list) if [ -f "$CRABBOX_DIR/warmed" ]; then cat "$CRABBOX_DIR/after.json"; else cat "$CRABBOX_DIR/before.json"; fi; exit 0 ;;',
         '  status) if [ -f "$CRABBOX_DIR/ready-$3" ]; then printf "lease x\\nready=true\\n"; else printf "ready=false\\n"; fi; exit 0 ;;',
         '  warmup) touch "$CRABBOX_DIR/warmed"; echo "leased cbx_freshone"; exit 0 ;;',
-        '  run) cat > "$CRABBOX_SCRIPT"; printf "%s\\nagent ok\\n" "' + LEASE_AGENT_MARKER + '"; exit 7 ;;',
+        '  run) cat > "$CRABBOX_SCRIPT"; printf "%s\\nagent ok\\n" "' + LEASE_AGENT_MARKER + '"; exit ' + String(opts.runExit ?? 7) + ' ;;',
         '  stop) exit 0 ;;',
         '  *) echo "unexpected command: $*" >&2; exit 1 ;;',
         'esac',
@@ -589,6 +609,36 @@ describe.skipIf(process.platform === 'win32')('leaseAndRun warm profile-pool reu
     expect(calls.some((l) => l.startsWith('status'))).toBe(false);
   });
 
+  it('stops a freshly-warmed box that failed bootstrap (exit 97), even without --fresh', async () => {
+    // The bug this guards: a normal --lease that warmed a NEW box and then failed
+    // `agents setup` used to leave the broken box idle-billing in the warm pool.
+    // A box this run provisioned that returns a bootstrap-failure code must be
+    // stopped — but a REUSED box (below) never is.
+    const fake = setupPoolFake({ boxes: [], readySlugs: [], runExit: LEASE_BOOTSTRAP_SETUP_FAILED });
+    const { result, phases, calls } = await runWithPool(fake);
+
+    expect(result.box.slug).toBe('fresh-one');
+    expect(result.exitCode).toBe(LEASE_BOOTSTRAP_SETUP_FAILED);
+    expect(result.toreDown).toBe(true);
+    expect(phases).toContain('teardown');
+    expect(calls).toContain('stop fresh-one');
+  });
+
+  it('never stops a REUSED pool box that failed bootstrap (its lifecycle is the caller’s)', async () => {
+    const fake = setupPoolFake({
+      boxes: [poolBoxJson('warm-one', { profile: 'agents-cli' })],
+      readySlugs: ['warm-one'],
+      runExit: LEASE_BOOTSTRAP_SETUP_FAILED,
+    });
+    const { result, phases, calls } = await runWithPool(fake);
+
+    expect(result.box.slug).toBe('warm-one');
+    expect(result.exitCode).toBe(LEASE_BOOTSTRAP_SETUP_FAILED);
+    expect(result.toreDown).toBe(false);
+    expect(phases).not.toContain('teardown');
+    expect(calls.some((l) => l.startsWith('stop'))).toBe(false);
+  });
+
   it('--fresh forces a brand-new box (torn down after) even when a ready pool box exists', async () => {
     const fake = setupPoolFake({ boxes: [poolBoxJson('warm-one', { profile: 'agents-cli' })], readySlugs: ['warm-one'] });
     const { result, phases, calls } = await runWithPool(fake, { fresh: true });
@@ -643,5 +693,20 @@ describe('isExpiredPoolStray — the on-lease expired-stray sweep', () => {
   });
   it('never a non-running box', () => {
     expect(isExpiredPoolStray(strayBox({ status: 'off' }), opts)).toBe(false);
+  });
+});
+
+describe('bootstrapFailed', () => {
+  it('is true for the install (96) and setup (97) failure codes', () => {
+    expect(bootstrapFailed(LEASE_BOOTSTRAP_INSTALL_FAILED)).toBe(true);
+    expect(bootstrapFailed(LEASE_BOOTSTRAP_SETUP_FAILED)).toBe(true);
+    expect(bootstrapFailed(96)).toBe(true);
+    expect(bootstrapFailed(97)).toBe(true);
+  });
+  it('is false for success, other nonzero codes, and null', () => {
+    expect(bootstrapFailed(0)).toBe(false);
+    expect(bootstrapFailed(1)).toBe(false);
+    expect(bootstrapFailed(130)).toBe(false);
+    expect(bootstrapFailed(null)).toBe(false);
   });
 });

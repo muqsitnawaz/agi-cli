@@ -1636,6 +1636,10 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
             const log = router.setupLines();
             if (log.length) process.stderr.write(chalk.dim(log.join('\n')) + '\n');
           }
+          const { bootstrapFailed } = await import('../lib/crabbox/lease.js');
+          if (bootstrapFailed(exitCode) && toreDown) {
+            console.error(chalk.red(`Leased box ${box.slug} was stopped because bootstrap did not complete — the agent did not start.`));
+          }
           const keptAddr = boxAddress(box);
           console.error(chalk.gray(toreDown ? `Box ${box.slug} destroyed.` : `Box ${box.slug} kept${keptAddr ? ` (${keptAddr})` : ''}. Stop it: agents devices lease stop ${box.slug}`));
           process.exit(exitCode === null ? 1 : exitCode);
