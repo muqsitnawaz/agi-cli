@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getDB, readSessionTopics } from '../session/db.js';
 import { getRuntimeStateDir } from '../state.js';
 import type { ClassifiedTopic } from './classify.js';
-import { buildIndexShard, syncTraces, type SyncRow } from './sync.js';
+import { buildIndexShard, buildSessionDetail, syncTraces, type SyncRow } from './sync.js';
 
 const id = 'trace-rich-fixture';
 const transcript = path.join(import.meta.dirname, '../session/testdata/codex-fixture.jsonl');
@@ -134,5 +135,125 @@ describe('rich traces index shard', () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
     expect(requests.filter((url) => url.includes(`/sessions/${id}.json`))).toHaveLength(1);
+  });
+});
+
+describe('buildSessionDetail (per-session drill-down shape)', () => {
+  const baseTraj = {
+    session: { id: 's1', agent: 'claude', model: 'opus-4-8', cwd: '/home/x/repo', costUsd: 1.5 },
+    spanMs: 60_000,
+    steps: [
+      { ordinal: 1, lane: 'Bash', tool: 'Bash', startMs: 0, durationMs: 100, outcome: 'error', label: 'git rebase' },
+      { ordinal: 2, lane: 'Read', tool: 'Read', startMs: 200, durationMs: 50, outcome: 'ok', label: 'read file' },
+    ],
+    gaps: [{ startMs: 300, durationMs: 130_000, afterOrdinal: 2 }],
+    programTimeShare: {},
+    errorCount: 1,
+    redacted: true,
+    stats: { userTurns: 3, assistantTurns: 4, toolCount: 2, outputTokens: 1000 },
+    truncatedSteps: 0,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+
+  it('emits the console meta summary from real trajectory fields', () => {
+    const d = buildSessionDetail(baseTraj);
+    expect(d.schema).toBe(1);
+    expect(d.id).toBe('s1');
+    expect(d.meta.spanMs).toBe(60_000);
+    expect(d.meta.turns).toBe(7); // userTurns + assistantTurns
+    expect(d.meta.tools).toBe(2);
+    expect(d.meta.errorCount).toBe(1);
+    expect(d.meta.tokens).toBe(1000);
+    expect(d.meta.costUsd).toBe(1.5);
+    expect(d.meta.outcome).toBe('errored');
+    expect(d.meta.repo).toBe('repo'); // cwd basename, not the full path (PII)
+    expect(d.meta.agent).toBe('claude');
+    expect(d.steps).toHaveLength(2);
+  });
+
+  it('synthesizes a whereItWentWrong narrative from error steps + stalls', () => {
+    const d = buildSessionDetail(baseTraj);
+    expect(d.whereItWentWrong).toContain('1 tool error');
+    expect(d.whereItWentWrong).toContain('Bash');
+    expect(d.whereItWentWrong).toContain('stalled 2m');
+  });
+
+  it('returns whereItWentWrong=null for a clean run', () => {
+    const clean = buildSessionDetail({
+      ...baseTraj,
+      steps: [baseTraj.steps[1]],
+      gaps: [],
+      errorCount: 0,
+    });
+    expect(clean.whereItWentWrong).toBeNull();
+    expect(clean.meta.outcome).toBe('completed');
+  });
+});
+
+describe('traces sync --dry-run local export', () => {
+  const dryId = 'trace-dryrun-fixture';
+  const dryTranscript = path.join(import.meta.dirname, '../session/testdata/codex-fixture.jsonl');
+
+  beforeEach(() => {
+    const db = getDB();
+    for (const table of ['tool_calls', 'session_topics', 'session_insights']) {
+      db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(dryId);
+    }
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(dryId);
+  });
+
+  it('requires --out', async () => {
+    await expect(syncTraces({ dryRun: true })).rejects.toThrow(/--out/);
+  });
+
+  it('writes shards locally with no backend and never touches the ledger', async () => {
+    const stat = fs.statSync(dryTranscript);
+    const db = getDB();
+    db.prepare(`
+      INSERT INTO sessions
+        (id, short_id, agent, timestamp, project, cwd, git_branch, label, duration_ms,
+         model, file_path, file_mtime_ms, file_size, machine)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      dryId, 'trace-dr', 'codex', '2026-08-25T00:00:00.000Z', 'agents-cli',
+      '/home/x/agents-cli', 'main', 'Fix dry run', 9000, 'gpt-test',
+      dryTranscript, stat.mtimeMs, stat.size, 'dry-device',
+    );
+    db.prepare(`
+      INSERT INTO tool_calls
+        (call_key, session_id, ordinal, timestamp, tool, input, outcome, exit_code, error, evidence_bytes)
+      VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, 0)
+    `).run('dry-call-1', dryId, 1, '2026-08-25T00:00:00.000Z', 'exec_command', 'error', 1, 'command failed');
+
+    const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'traces-dry-'));
+    const ledgerPath = path.join(getRuntimeStateDir(), 'traces-sync.json');
+    fs.rmSync(ledgerPath, { force: true });
+    // No AGENTS_TRACES_BASE_URL / token set: a dry-run must NOT resolve a backend.
+    delete process.env.AGENTS_TRACES_BASE_URL;
+    delete process.env.AGENTS_TRACES_WRITE_TOKEN;
+    process.env.AGENTS_SYNC_MACHINE_ID = 'dry-device';
+    try {
+      const result = await syncTraces({ dryRun: true, outDir });
+      expect(result.uploaded).toBeGreaterThan(0);
+
+      // index.json — rich shard, owner "local" (no Phoenix userId available).
+      const index = JSON.parse(fs.readFileSync(path.join(outDir, 'index.json'), 'utf8'));
+      expect(index.schema).toBe(1);
+      expect(index.owner).toBe('local');
+      expect(index.stats.sessionsImported).toBeGreaterThan(0);
+
+      // sessions/<id>.json — the console's SessionDetail shape.
+      const detail = JSON.parse(fs.readFileSync(path.join(outDir, 'sessions', `${dryId}.json`), 'utf8'));
+      expect(detail.schema).toBe(1);
+      expect(detail.meta).toHaveProperty('spanMs');
+      expect(detail).toHaveProperty('whereItWentWrong');
+      expect(detail.meta.repo).toBe('agents-cli');
+
+      // The ledger is untouched — a dry-run is a read-only export.
+      expect(fs.existsSync(ledgerPath)).toBe(false);
+    } finally {
+      delete process.env.AGENTS_SYNC_MACHINE_ID;
+      fs.rmSync(outDir, { recursive: true, force: true });
+    }
   });
 });

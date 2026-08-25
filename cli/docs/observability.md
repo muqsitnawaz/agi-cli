@@ -19,6 +19,22 @@ block clears, preventing stale session reads from resurrecting answered asks. Th
 publishes one versioned stream; thin clients replace state on reset and apply monotonic
 increments.
 
+## Account and usage projections
+
+Authentication health and quota are separate signals with separate freshness. Provider
+collectors normalize quota into stable window slots; unavailable evidence renders as
+unavailable rather than as zero usage.
+
+Claude quota is event-fed rather than polled. Claude Code sends native five-hour and
+seven-day rate-limit fields to the managed status-line command after an inference
+response. Ingestion merges whichever windows arrived into the previous per-account
+snapshot, so one omitted window does not erase the other. No interactive OAuth or
+Keychain credential is copied or read to populate usage.
+
+Identity and plan come from version-home state. The human-facing account row exposes one
+last-active timestamp; probe age remains machine-readable health metadata rather than a
+second activity timestamp.
+
 Health findings use one severity registry and one remediation vocabulary. A finding must
 name a command that fixes the full scope represented by its row. Unavailable evidence is
 reported as unknown or degraded, never healthy by default.
