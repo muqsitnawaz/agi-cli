@@ -33,6 +33,8 @@ Harnesses remain separate processes with native storage and authentication.
 Remote execution crosses SSH through the same command and environment contracts as
 local execution. AGI EXT and the menu bar are projections: they may poll read-only state
 and request actions, but never decide when fleet-affecting work should execute.
+Extension-internal presentation and terminal architecture belongs in the
+[AGI EXT repository](https://github.com/phnx-labs/agi-ext/tree/main/docs).
 
 ## State ownership
 

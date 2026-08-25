@@ -1194,9 +1194,11 @@ been closed stays as a `(resolved)` entry so references never dangle.
 ## Detailed design
 
 [`docs/`](docs/README.md) is the source-grounded reference. Start with
-[`architecture.md`](docs/architecture.md) for the CLI/extension layering and the
+[`architecture.md`](docs/architecture.md) for CLI ownership boundaries and the
 session mechanisms, then [`concepts.md`](docs/concepts.md) for the resource
-model. The normative contract
+model. Extension-owned presentation design lives in the
+[AGI EXT architecture](https://github.com/phnx-labs/agi-ext/tree/main/docs).
+The normative contract
 ([`specifications.md`](docs/specifications.md)) sits
 alongside the reference docs ([sessions.md](docs/sessions.md),
 [secrets.md](docs/secrets.md)) — read the spec for the guarantee, the reference
