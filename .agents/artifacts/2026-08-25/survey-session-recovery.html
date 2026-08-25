@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Every way a session comes back, and which interruptions each one survives</title>
+<style>
+:root{--font-body:Inter,Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-display:Inter,Inter,system-ui,sans-serif;--font-mono:"JetBrains Mono","JetBrains Mono","SFMono-Regular",Consolas,monospace;}
+@page{margin:24px}
+:root{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;--content-width:980px;--page-padding:24px;--mobile-page-padding:16px;--hero-top:40px;--hero-bottom:28px;--section-spacing:36px;--figure-spacing:22px;--panel-padding:16px;--footer-spacing:64px;--print-margin:24px;--code:#0c0f0d;--code-text:#e7ece8;--radius:10px}
+@media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}}
+:root[data-theme="light"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}
+@media print{:root,:root[data-theme="light"],:root[data-theme="dark"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);line-height:1.6;-webkit-font-smoothing:antialiased;transition:background-color .15s ease,color .15s ease}main{width:100%;max-width:var(--content-width);min-width:0;margin:0 auto;padding:24px var(--page-padding) 80px}.document-header{display:flex;align-items:center;justify-content:flex-end;min-height:42px;border-bottom:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}.header-label{min-width:0;margin-right:auto;padding-right:12px;overflow-wrap:anywhere;color:var(--text);font-weight:650}.theme-toggle{display:inline-flex;flex:0 0 auto;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font:500 12px/1 var(--font-mono);cursor:pointer}.theme-toggle:hover{color:var(--accent);border-color:var(--accent)}.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.hero{padding:var(--hero-top) 0 var(--hero-bottom);border-bottom:1px solid var(--line)}.kicker{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-family:var(--font-mono);font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-weight:500}.kicker-part{color:var(--accent)}.kicker-separator{color:var(--muted);padding:0 2px}.status-badge{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn);font-family:var(--font-mono);font-size:10.5px;font-weight:650;letter-spacing:.1em;text-transform:uppercase;line-height:1}.status-badge.status-implementing,.status-badge.status-in-progress,.status-badge.status-review,.status-badge.status-done,.status-badge.status-complete{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}.hero h1{font-family:var(--font-display);font-size:clamp(30px,4vw,44px);line-height:1.1;margin:12px 0 14px;letter-spacing:-.01em}.summary{max-width:760px;color:var(--muted);font-size:17px;margin:0}.meta{display:grid;gap:14px;margin-top:20px}.facts-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.meta-block{display:grid;gap:8px}.meta-label{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}.meta-row{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}.chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 11px;color:var(--muted);font-family:var(--font-mono);font-size:11.5px;line-height:1.5}.chip-value{color:var(--text);overflow-wrap:anywhere}.chip-icon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;fill:currentColor;flex:0 0 auto}.chip-favicon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;border-radius:2px;object-fit:contain;flex:0 0 auto}.chip-value a{color:inherit;text-decoration:none}.chip-value a:hover{text-decoration:underline}.provenance-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.provenance-line a{color:var(--accent-alt);text-decoration:none}.provenance-line a:hover{text-decoration:underline}.provenance-part{color:var(--muted)}.meta-sep{margin:0 7px;opacity:.45}.toc{display:grid;gap:5px;margin:24px 0 8px;font-family:var(--font-mono);font-size:13px}.code-diff{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--code)}.code-diff-pre{margin:0;padding:10px 0;background:none;border:none;border-radius:0;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.55;color:var(--code-text)}.cd-line{display:block;white-space:pre;padding:0 14px}.cd-sign{display:inline-block;width:1.4ch;color:var(--muted);user-select:none}.cd-add{background:color-mix(in srgb,var(--accent) 15%,transparent)}.cd-add .cd-sign{color:var(--accent)}.cd-del{background:color-mix(in srgb,var(--danger) 15%,transparent)}.cd-del .cd-sign{color:var(--danger)}.cd-hunk,.cd-meta{color:var(--muted);opacity:.8}.code-diff>summary{list-style:none;cursor:pointer;padding:8px 14px;font-family:var(--font-mono);font-size:12px;color:var(--code-text);background:color-mix(in srgb,var(--code-text) 8%,var(--code));border-bottom:1px solid transparent;user-select:none}.code-diff[open]>summary{border-bottom-color:color-mix(in srgb,var(--code-text) 15%,transparent)}.code-diff>summary::-webkit-details-marker{display:none}.code-diff>summary::before{content:"\25B8";display:inline-block;margin-right:7px;color:color-mix(in srgb,var(--code-text) 55%,transparent);font-size:10px;transition:transform .12s ease}.code-diff[open]>summary::before{transform:rotate(90deg)}.checklist{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.checklist-head{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:10px}.checklist-items{list-style:none;margin:0;padding:0;display:grid;gap:7px}.cl-item{display:flex;align-items:baseline;gap:9px}.cl-box{flex:0 0 auto;font-family:var(--font-mono);font-size:.95em}.cl-done .cl-box{color:var(--accent)}.cl-todo .cl-box{color:var(--muted)}.cl-doing .cl-box{color:var(--warn)}.cl-done .cl-text{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}.toc a{color:var(--muted);text-decoration:none}.toc a:hover{color:var(--accent)}.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.toc-index{color:var(--accent);font-family:var(--font-mono);font-size:.9em}.artifact-body{min-width:0;padding-top:18px;counter-reset:section}h2{font-size:24px;margin:var(--section-spacing) 0 12px;line-height:1.2;letter-spacing:-.01em}.artifact-body>h2{counter-increment:section}.artifact-body>h2::before{content:counter(section,decimal-leading-zero);font-family:var(--font-mono);font-size:.62em;color:var(--accent);margin-right:10px;opacity:.85}h3{font-size:17px;margin:calc(var(--section-spacing) * .78) 0 10px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}p,li,dd,figcaption{overflow-wrap:anywhere}pre{background:var(--code);color:var(--code-text);padding:var(--panel-padding);border-radius:12px;overflow:auto;border:1px solid var(--line)}code{font-family:var(--font-mono);font-size:.88em;background:var(--surface-alt);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--accent-alt)}pre code{background:none;border:none;padding:0;color:inherit}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}blockquote{border-left:3px solid var(--accent);padding-left:var(--panel-padding);color:var(--muted);margin-left:0}img{display:block;max-width:100%;height:auto}svg{max-width:100%;height:auto}.artifact-body>p>img{margin:var(--figure-spacing) auto}.artifact-grid{display:grid;gap:var(--panel-padding);margin:var(--figure-spacing) 0}.artifact-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}.artifact-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.artifact-panel,.artifact-stat{min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.artifact-panel h3{margin:10px 0 8px;font-size:16px}.artifact-stat-value,.artifact-stat-label{display:block}.artifact-stat-value{color:var(--text);font-family:var(--font-display);font-size:24px;line-height:1.15}.artifact-stat-label{margin-top:6px;color:var(--muted);font-size:13px}.artifact-tag{display:inline-block;--tag-color:var(--muted);background:color-mix(in srgb,var(--tag-color) 12%,transparent);border:1px solid color-mix(in srgb,var(--tag-color) 30%,transparent);border-radius:6px;padding:2px 8px;color:var(--tag-color);font-family:var(--font-mono);font-size:11px;font-weight:600;text-transform:uppercase}.artifact-tag-accent{--tag-color:var(--accent)}.artifact-callout{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;background:var(--surface-alt);padding:var(--panel-padding)}.artifact-callout-warn{border-left-color:var(--warn)}.artifact-callout-danger{border-left-color:var(--danger)}.artifact-callout strong{color:var(--text)}.artifact-figure{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding);overflow-x:auto}.artifact-figure>img,.artifact-image{width:auto;max-width:100%;height:auto;margin:0 auto}.artifact-figure-diagram{background:#0e120f;border-color:#26302a}.artifact-diagram{display:block;width:100%;height:auto;margin:0 auto}.artifact-figure-tall{width:100%;max-width:394px;margin-left:auto;margin-right:auto}.artifact-figure figcaption{margin-top:12px;color:var(--muted);font-family:var(--font-mono);font-size:12px;text-align:center}.artifact-figure.artifact-figure-diagram figcaption{color:#8b938c}.artifact-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:12px 0;color:var(--muted);font-family:var(--font-mono);font-size:11.5px}.artifact-behavior{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;display:grid;grid-template-columns:1fr 1fr}.artifact-behavior-panel{padding:var(--panel-padding);background:var(--surface)}.artifact-behavior-panel+.artifact-behavior-panel{border-left:1px solid var(--line)}.artifact-behavior-panel::before{display:block;font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:500;margin-bottom:8px;content:""}.artifact-behavior-panel[data-state="current"]::before{content:"Current"}.artifact-behavior-panel[data-state="proposed"]{background:color-mix(in srgb,var(--accent) 6%,var(--surface))}.artifact-behavior-panel[data-state="proposed"]::before{content:"Proposed";color:var(--accent)}.document-footer{margin-top:var(--footer-spacing);padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}
+@media(max-width:720px){main{padding:32px var(--mobile-page-padding) 64px}.artifact-grid-2,.artifact-grid-3{grid-template-columns:1fr}.artifact-figure{padding:min(12px,var(--panel-padding))}.artifact-figure-wide .artifact-diagram{min-width:640px}.artifact-behavior{grid-template-columns:1fr}.artifact-behavior-panel+.artifact-behavior-panel{border-left:none;border-top:1px solid var(--line)}table{display:block;max-width:100%;overflow-x:auto}th,td{min-width:140px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}}
+@media print{body{transition:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}.toc,.theme-toggle{display:none}.document-header-empty{display:none}main{max-width:none;padding:0}:root[data-pdf-layout="poster"] main{max-width:var(--content-width);margin:0 auto;padding:var(--print-margin)}.chip{background:var(--surface)}.chip-value{color:var(--text)}.provenance-line,.provenance-line a,.facts-line{color:var(--text)}.status-badge{color:var(--text);border-color:var(--line)}h2,h3{break-after:avoid-page}.artifact-figure,.artifact-grid,.artifact-panel,.artifact-stat,.artifact-callout,.artifact-behavior,pre,table,blockquote,.meta{break-inside:avoid}.artifact-figure-wide .artifact-diagram{min-width:0}.artifact-figure-tall{max-width:330px}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--text);text-decoration:underline}}
+</style>
+</head>
+<body>
+<main>
+<header class="document-header"><div class="header-label">AGI CLI · session recovery</div><button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false" title="Toggle color theme"><span aria-hidden="true">&#9680;</span> theme</button></header>
+<section class="hero">
+<div class="kicker"><span class="kicker-part">agents-cli</span><span class="kicker-separator" aria-hidden="true">&middot;</span><span class="kicker-part">report</span><span class="status-badge status-draft">draft</span></div>
+<h1>Every way a session comes back, and which interruptions each one survives</h1>
+<p class="summary">Surveyed from the code, not the docs. There are two fundamentally different mechanisms — attach a live process, or replay a transcript into a new one — and most of the confusion is that one verb does both without saying which it did.</p>
+<div class="meta" aria-label="Artifact metadata"><p class="facts-line">Two mechanisms: ATTACH rejoins a live process; RESUME replays a transcript into a new one<span class="meta-sep" aria-hidden="true">·</span>Resume does NOT require tmux — tmux is one of five terminal backends<span class="meta-sep" aria-hidden="true">·</span>Our tmux runs on its own socket and sources the user config after our defaults, so user bindings win<span class="meta-sep" aria-hidden="true">·</span>No launchd unit keeps the tmux server alive, so a reboot makes attach impossible — replay only<span class="meta-sep" aria-hidden="true">·</span>A LOCAL crash does not kill a REMOTE agent: it stays attachable, and nothing tells you</p><div class="meta-block meta-links"><div class="meta-label">Related</div><ul class="meta-row meta-row-links"><li class="chip"><span class="chip-value"><svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><a href="https://linear.app/prix/issue/RUSH-3125" target="_blank" rel="noopener">RUSH-3125</a></span></li></ul></div><p class="provenance-line" aria-label="Provenance"><span class="provenance-part"><a href="https://github.com/phnx-labs/agents-cli" target="_blank" rel="noopener">phnx-labs/agents-cli</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">plan/reconnect-architecture</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">RUSH-3125</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Claude</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Muqsit</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">zion</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part"><a href="agents://session/e9b853bc">e9b853bc</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">2026-08-25</span></p></div>
+</section>
+<nav class="toc" aria-label="Artifact sections"><a href="#summary"><span class="toc-index">01&nbsp;&middot;&nbsp;</span>Summary</a><a href="#findings"><span class="toc-index">02&nbsp;&middot;&nbsp;</span>Findings</a><a href="#evidence"><span class="toc-index">03&nbsp;&middot;&nbsp;</span>Evidence</a><a href="#recommendation"><span class="toc-index">04&nbsp;&middot;&nbsp;</span>Recommendation</a></nav><article class="artifact-body"><h2 id="summary">Summary</h2>
+<p>Surveyed from the source. There are <strong>two</strong> recovery mechanisms, not many: <strong>attach</strong> a
+live process, or <strong>replay</strong> a transcript into a new one. <code>resume</code> silently does either and
+never says which — that is the root of the "it barely works" feeling. Resume does not need
+tmux (tmux is one of five terminal backends). A machine reboot kills a <em>local</em> agent for
+good, but leaves a <em>remote</em> one alive and attachable — and nothing tells you. Existing tmux
+users are already protected by design; users who don't know tmux see a status bar they
+didn't ask for.</p>
+<h2 id="findings">Findings</h2>
+<h3>The distinction everything else hangs off</h3>
+<p>Read from the code, the recovery surface is not many mechanisms. It is <strong>two</strong>, and
+almost every confusion comes from one verb doing both without telling you which:</p>
+<p><strong>ATTACH</strong> — rejoin the <em>process that is still running</em>. Needs a live handle: a tmux
+pane, or a Ghostty tab. <strong>Nothing is lost</strong>; you are back in the same agent, mid-turn.</p>
+<p><strong>RESUME</strong> — start a <em>new</em> process that replays the transcript. Needs no live handle,
+only the transcript on disk. <strong>The in-flight turn is gone</strong>; the agent re-reads the
+conversation and continues from there.</p>
+<p><code>lib/session/recovery.ts:18</code> shows resume has exactly two shapes, and neither of them
+attaches to anything:</p>
+<pre><code>export type SessionRecoveryTarget =
+  | { mode: 'native';   agent: AgentId; version: string; cwd?: string; reason: string }
+  | { mode: 'continue'; agent: AgentId; version: string; reason: string };
+</code></pre>
+<p><code>native</code> = the harness's own <code>--resume</code>. <code>continue</code> = a <code>/continue</code> replay. Both are a
+<strong>new process</strong>.</p>
+<aside class="artifact-callout"><strong>Load-bearing takeaway:</strong> when you said the
+agent "comes back as a stranger", that was resume, not attach. The system silently
+degrades from one to the other and never says so — which is RUSH-3139, and is the single
+biggest source of the "it barely works" feeling.</aside><h3>The verbs that actually exist</h3>
+<p>From <code>agents sessions --help</code> and the command sources, not the docs:</p>
+<table>
+<thead>
+<tr>
+<th>Verb</th>
+<th>What it really does</th>
+<th>Needs a live process?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>sessions resume &lt;id&gt;</code></td>
+<td><strong>The one front door.</strong> Attaches a live pane if there is one, else recovers. <code>--attach-only</code> refuses to fall through</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>sessions focus</code></td>
+<td>Older spelling, hidden. Same body — <code>focusAction</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>sessions attach</code></td>
+<td>Deprecated → <code>resume</code>. Was: stop the headless continuation, bring it back interactive</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>sessions detach &lt;id&gt;</code></td>
+<td>Park a live agent to headless — keeps working, no terminal</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>sessions stop &lt;id&gt;</code></td>
+<td>End it and tear down its tmux/mux session</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>sessions inject &lt;id&gt; &lt;text&gt;</code></td>
+<td>Type into the terminal a live session lives in — how the daemon watchdog nudges</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>sessions migrate &lt;id&gt;</code></td>
+<td>Move a running session to another machine</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><em>(reconnect loop)</em></td>
+<td>Not a verb. Runs inside <code>agents run</code>, calls focus on a dropped link</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<h3>"Select which program to resume into" — and no, it does not need tmux</h3>
+<p>That is the <strong>terminal launch engine</strong>, <code>lib/terminal/backends/</code>:</p>
+<pre><code>ghostty.ts   iterm.ts   terminal-app.ts   tmux.ts   vscodium-agent.ts
+</code></pre>
+<p><strong>tmux is one backend of five.</strong> When you multi-select in <code>sessions resume</code>, it fans each
+pick into a tab/split via whichever backend fits — VS Codium, Ghostty, iTerm, Terminal.app.
+That path is a <em>resume</em> (new process, transcript replay), so it works with tmux entirely
+absent. That is why it felt like a separate, weirder mechanism: it is a different
+mechanism, and it is the one that always works.</p>
+<h3>What survives which interruption</h3>
+<p>The table you actually asked for. <code>agent</code> = the harness process; <code>pane</code> = the tmux pane
+holding it.</p>
+<table>
+<thead>
+<tr>
+<th>Interruption</th>
+<th>Agent</th>
+<th>Pane</th>
+<th>Attach possible?</th>
+<th>What you get today</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Network blink, remote agent, <strong>wrapped</strong> (post-RUSH-3125)</td>
+<td>lives</td>
+<td>lives</td>
+<td><strong>yes</strong></td>
+<td>reconnect loop re-attaches — no loss</td>
+</tr>
+<tr>
+<td>Network blink, remote agent, tmux off (today's shipped code)</td>
+<td><strong>dies</strong></td>
+<td>—</td>
+<td>no</td>
+<td>replay, or nothing</td>
+</tr>
+<tr>
+<td>Network blink, <code>--raw</code> / <code>--no-tmux</code></td>
+<td><strong>dies</strong></td>
+<td>—</td>
+<td>no</td>
+<td>replay, or nothing</td>
+</tr>
+<tr>
+<td><strong>Close the VS Codium tab</strong></td>
+<td>lives</td>
+<td>lives</td>
+<td><strong>yes</strong></td>
+<td><em>nothing happens</em> — the reconnect loop died with the tab</td>
+</tr>
+<tr>
+<td><strong>VS Codium crashes</strong></td>
+<td>lives</td>
+<td>lives</td>
+<td><strong>yes</strong></td>
+<td>same — orphaned, nothing surfaces it</td>
+</tr>
+<tr>
+<td><strong>Your laptop reboots</strong>, agent is on a <strong>peer</strong></td>
+<td><strong>lives</strong></td>
+<td><strong>lives</strong></td>
+<td><strong>yes</strong></td>
+<td><em>nothing happens</em> — this is recoverable and nobody tells you</td>
+</tr>
+<tr>
+<td><strong>Your laptop reboots</strong>, agent is <strong>local</strong></td>
+<td>dies</td>
+<td>dies</td>
+<td><strong>no</strong></td>
+<td>replay only</td>
+</tr>
+<tr>
+<td>Peer reboots</td>
+<td>dies</td>
+<td>dies</td>
+<td>no</td>
+<td>replay only</td>
+</tr>
+<tr>
+<td>Agent exits on its own</td>
+<td>dies</td>
+<td>pane kept (<code>remain-on-exit</code>)</td>
+<td>no</td>
+<td>replay</td>
+</tr>
+</tbody></table>
+<p>Two rows matter most, and both are the same defect:</p>
+<p><strong>Your reboot question, precisely:</strong> if the agent was <strong>local</strong>, no — the tmux server has
+no launchd unit (<code>~/Library/LaunchAgents/</code> holds <code>agents-daemon</code>, <code>agents-menubar</code>,
+<code>computer-helper</code>, <code>whatsapp-bridge</code> — no tmux), so the server dies with the machine and
+attach is impossible. Replay is all there is.</p>
+<p>But if the agent was on a <strong>peer</strong> — which is how you actually work — your laptop
+rebooting does not touch it. The peer's tmux keeps running and the agent is still there,
+still attachable, <strong>fully recoverable with zero loss</strong>. Today nothing tells you that, and
+nothing goes and gets it. That is the daemon gap.</p>
+<h3>tmux, for users who do and do not already use it</h3>
+<p>You were right to worry about both, and the code already answers one of them well.</p>
+<p><strong>Existing tmux users: safe, by design.</strong> Two mechanisms:</p>
+<ol>
+<li><p><strong>Separate server.</strong> We run on our own socket (<code>~/.agents/.cache/helpers/tmux/server.sock</code>,
+<code>lib/tmux/paths.ts:18</code>), so your own tmux server, sessions and windows are untouched.</p>
+</li>
+<li><p><strong>Your config still wins.</strong> <code>writeStartupConfig</code> (<code>lib/tmux/session.ts:54</code>) writes our
+defaults <em>first</em>, then <code>source-file -q</code> every config tmux itself would have loaded —
+and it deliberately sources <strong>all</strong> of them, not just the first:</p>
+<blockquote>
+<p>tmux's own <code>start_cfg()</code> sources EVERY entry of <code>TMUX_CONF</code> that exists, not just the
+first … Sourcing only the first would silently drop the second and break the "never
+override a user-set value" contract this file exists to keep.</p>
+</blockquote>
+<p>Config files execute in order, so ours are defaults and every option or binding you set
+overrides them.</p>
+</li>
+</ol>
+<p><strong>Users who don't know tmux: the gap you predicted is real.</strong> The defaults are chosen for
+them — <code>mouse on</code>, <code>set-clipboard on</code>, 100k history, copy-mode drag-to-copy
+(<code>session.ts:79-84</code>) — so scrolling and selecting behave normally. But there is <strong>no
+<code>status off</code></strong>, so they get a tmux status bar at the bottom of their agent tab and a
+prefix key they have never heard of. For someone who did not opt into tmux, that is a
+visible, confusing artifact of an implementation detail.</p>
+<p><strong>Leaked processes: already solved, better than I expected.</strong> <code>lib/tmux/orphan-reap.ts</code>
+(RUSH-2521) reaps helpers an exited agent leaves behind, attributing them <strong>by environment</strong>
+rather than pid ancestry — because every obvious handle is destroyed by the very event
+being detected:</p>
+<blockquote>
+<p><strong>ppid ancestry</strong> — an orphan is reparented to init the instant its parent dies …
+<strong>controlling terminal</strong> — POSIX disassociates it … <strong>process group</strong> — the helpers that
+survive are precisely the ones that left the pane's group.</p>
+</blockquote>
+<p>Measured motivation in that file: one pane holding <strong>2.5 GB</strong> of Claude Code background
+daemons 22 days after its session ended, and 34 orphaned <code>cgraph-mcp --daemon</code> processes on
+a single worker. The daemon sweeps this every 5 minutes.</p>
+<h2 id="evidence">Evidence</h2>
+<h3>What is actually broken</h3>
+<p>Not the mechanisms. Each works. Three things are missing between them:</p>
+<ol>
+<li><strong>Nobody owns an orphaned-but-alive session.</strong> Close the tab, crash VS Codium, reboot
+your laptop — the remote agent is fine and attachable, and nothing notices or offers it.
+The reconnect loop can't: it lived in the tab.</li>
+<li><strong>Resume masquerades as attach.</strong> When the pane is gone, <code>focus</code> silently falls through
+to replay. Same verb, completely different outcome, no notice. (RUSH-3139.)</li>
+<li><strong>Non-tmux users see tmux.</strong> The wrap is an implementation detail leaking into the UI as
+a status bar and unfamiliar keys.</li>
+</ol>
+<h2 id="recommendation">Recommendation</h2>
+<p><strong>Own the orphan in the daemon, and never let resume pretend to be attach.</strong></p>
+<ul>
+<li>The daemon already sweeps tmux panes every 5 minutes and already runs the watchdog. Give
+it one more state: a session <strong>alive on a peer with no client attached</strong>. On boot it
+should find these — that is exactly the post-reboot case, and it is the one where attach
+still works and today does nothing.</li>
+<li>Surface that state first in <code>agents sessions</code> and the Fleet panel; re-attach stays a
+user action, never an automatic tab-reopen.</li>
+<li>Make the attach-vs-replay outcome explicit at every call site: say <em>"rejoined the live
+agent"</em> or <em>"the pane was gone — replayed the transcript, the in-flight turn is lost."</em></li>
+<li>For non-tmux users, hide the chrome: <code>status off</code> on our server by default, restorable
+for people who want it. The durability is the point; the status bar is not.</li>
+</ul>
+<p>None of that requires making users learn tmux, and none of it changes their config.</p>
+</article>
+<footer class="document-footer">Phoenix Labs</footer>
+</main>
+<script type="application/json" id="artifacts-source">{"encoding":"base64","markdown":"LS0tCmtpbmQ6IHJlcG9ydAp0ZW1wbGF0ZTogcmVwb3J0LnYxCnRpdGxlOiBFdmVyeSB3YXkgYSBzZXNzaW9uIGNvbWVzIGJhY2ssIGFuZCB3aGljaCBpbnRlcnJ1cHRpb25zIGVhY2ggb25lIHN1cnZpdmVzCnN1bW1hcnk6ID4tCiAgU3VydmV5ZWQgZnJvbSB0aGUgY29kZSwgbm90IHRoZSBkb2NzLiBUaGVyZSBhcmUgdHdvIGZ1bmRhbWVudGFsbHkgZGlmZmVyZW50CiAgbWVjaGFuaXNtcyDigJQgYXR0YWNoIGEgbGl2ZSBwcm9jZXNzLCBvciByZXBsYXkgYSB0cmFuc2NyaXB0IGludG8gYSBuZXcgb25lIOKAlCBhbmQKICBtb3N0IG9mIHRoZSBjb25mdXNpb24gaXMgdGhhdCBvbmUgdmVyYiBkb2VzIGJvdGggd2l0aG91dCBzYXlpbmcgd2hpY2ggaXQgZGlkLgpoZWFkZXI6IEFHSSBDTEkgwrcgc2Vzc2lvbiByZWNvdmVyeQpmb290ZXI6IFBob2VuaXggTGFicwpwcm9qZWN0OiBhZ2VudHMtY2xpCmNvbnRleHQ6ID4tCiAgT3duZXIgYXNrZWQgd2hhdCBpbnRlcnJ1cHRpb25zIHJlY29ubmVjdCBpcyBtZWFudCB0byBoYW5kbGUsIHdoZXRoZXIgaXQgc3Vydml2ZXMgYQogIG1hY2hpbmUgcmVib290LCBob3cgdGhlIHJlc3VtZS1pbnRvLWEtcHJvZ3JhbSBtZWNoYW5pc20gcmVsYXRlcywgYW5kIHdoZXRoZXIgdG11eAogIGNhbiBiZSBhZG9wdGVkIHdpdGhvdXQgYnJlYWtpbmcgdXNlcnMgd2hvIGRvIG9yIGRvIG5vdCBhbHJlYWR5IHVzZSBpdC4KcmVwb3NpdG9yeTogcGhueC1sYWJzL2FnZW50cy1jbGkKYnJhbmNoOiBwbGFuL3JlY29ubmVjdC1hcmNoaXRlY3R1cmUKc3VyZmFjZTogY2xpCnRyYWNraW5nOiBSVVNILTMxMjUKc3RhdHVzOiBkcmFmdApoYXJuZXNzOiBjbGF1ZGUKYWdlbnQ6IGNsYXVkZQpodW1hbjogTXVxc2l0Cmhvc3Q6IHppb24Kc2Vzc2lvbjogZTliODUzYmMKZGF0ZTogJzIwMjYtMDgtMjUnCmZhY3RzOgogIC0gJ1R3byBtZWNoYW5pc21zOiBBVFRBQ0ggcmVqb2lucyBhIGxpdmUgcHJvY2VzczsgUkVTVU1FIHJlcGxheXMgYSB0cmFuc2NyaXB0IGludG8gYSBuZXcgb25lJwogIC0gJ1Jlc3VtZSBkb2VzIE5PVCByZXF1aXJlIHRtdXgg4oCUIHRtdXggaXMgb25lIG9mIGZpdmUgdGVybWluYWwgYmFja2VuZHMnCiAgLSAnT3VyIHRtdXggcnVucyBvbiBpdHMgb3duIHNvY2tldCBhbmQgc291cmNlcyB0aGUgdXNlciBjb25maWcgYWZ0ZXIgb3VyIGRlZmF1bHRzLCBzbyB1c2VyIGJpbmRpbmdzIHdpbicKICAtICdObyBsYXVuY2hkIHVuaXQga2VlcHMgdGhlIHRtdXggc2VydmVyIGFsaXZlLCBzbyBhIHJlYm9vdCBtYWtlcyBhdHRhY2ggaW1wb3NzaWJsZSDigJQgcmVwbGF5IG9ubHknCiAgLSAnQSBMT0NBTCBjcmFzaCBkb2VzIG5vdCBraWxsIGEgUkVNT1RFIGFnZW50OiBpdCBzdGF5cyBhdHRhY2hhYmxlLCBhbmQgbm90aGluZyB0ZWxscyB5b3UnCmxpbmtzOgogIC0gdGl0bGU6IFJVU0gtMzEyNQogICAgdXJsOiBodHRwczovL2xpbmVhci5hcHAvcHJpeC9pc3N1ZS9SVVNILTMxMjUKYXNzZXRzOiBbXQotLS0KCiMjIFN1bW1hcnkKClN1cnZleWVkIGZyb20gdGhlIHNvdXJjZS4gVGhlcmUgYXJlICoqdHdvKiogcmVjb3ZlcnkgbWVjaGFuaXNtcywgbm90IG1hbnk6ICoqYXR0YWNoKiogYQpsaXZlIHByb2Nlc3MsIG9yICoqcmVwbGF5KiogYSB0cmFuc2NyaXB0IGludG8gYSBuZXcgb25lLiBgcmVzdW1lYCBzaWxlbnRseSBkb2VzIGVpdGhlciBhbmQKbmV2ZXIgc2F5cyB3aGljaCDigJQgdGhhdCBpcyB0aGUgcm9vdCBvZiB0aGUgIml0IGJhcmVseSB3b3JrcyIgZmVlbGluZy4gUmVzdW1lIGRvZXMgbm90IG5lZWQKdG11eCAodG11eCBpcyBvbmUgb2YgZml2ZSB0ZXJtaW5hbCBiYWNrZW5kcykuIEEgbWFjaGluZSByZWJvb3Qga2lsbHMgYSAqbG9jYWwqIGFnZW50IGZvcgpnb29kLCBidXQgbGVhdmVzIGEgKnJlbW90ZSogb25lIGFsaXZlIGFuZCBhdHRhY2hhYmxlIOKAlCBhbmQgbm90aGluZyB0ZWxscyB5b3UuIEV4aXN0aW5nIHRtdXgKdXNlcnMgYXJlIGFscmVhZHkgcHJvdGVjdGVkIGJ5IGRlc2lnbjsgdXNlcnMgd2hvIGRvbid0IGtub3cgdG11eCBzZWUgYSBzdGF0dXMgYmFyIHRoZXkKZGlkbid0IGFzayBmb3IuCgojIyBGaW5kaW5ncwoKIyMjIFRoZSBkaXN0aW5jdGlvbiBldmVyeXRoaW5nIGVsc2UgaGFuZ3Mgb2ZmCgpSZWFkIGZyb20gdGhlIGNvZGUsIHRoZSByZWNvdmVyeSBzdXJmYWNlIGlzIG5vdCBtYW55IG1lY2hhbmlzbXMuIEl0IGlzICoqdHdvKiosIGFuZAphbG1vc3QgZXZlcnkgY29uZnVzaW9uIGNvbWVzIGZyb20gb25lIHZlcmIgZG9pbmcgYm90aCB3aXRob3V0IHRlbGxpbmcgeW91IHdoaWNoOgoKKipBVFRBQ0gqKiDigJQgcmVqb2luIHRoZSAqcHJvY2VzcyB0aGF0IGlzIHN0aWxsIHJ1bm5pbmcqLiBOZWVkcyBhIGxpdmUgaGFuZGxlOiBhIHRtdXgKcGFuZSwgb3IgYSBHaG9zdHR5IHRhYi4gKipOb3RoaW5nIGlzIGxvc3QqKjsgeW91IGFyZSBiYWNrIGluIHRoZSBzYW1lIGFnZW50LCBtaWQtdHVybi4KCioqUkVTVU1FKiog4oCUIHN0YXJ0IGEgKm5ldyogcHJvY2VzcyB0aGF0IHJlcGxheXMgdGhlIHRyYW5zY3JpcHQuIE5lZWRzIG5vIGxpdmUgaGFuZGxlLApvbmx5IHRoZSB0cmFuc2NyaXB0IG9uIGRpc2suICoqVGhlIGluLWZsaWdodCB0dXJuIGlzIGdvbmUqKjsgdGhlIGFnZW50IHJlLXJlYWRzIHRoZQpjb252ZXJzYXRpb24gYW5kIGNvbnRpbnVlcyBmcm9tIHRoZXJlLgoKYGxpYi9zZXNzaW9uL3JlY292ZXJ5LnRzOjE4YCBzaG93cyByZXN1bWUgaGFzIGV4YWN0bHkgdHdvIHNoYXBlcywgYW5kIG5laXRoZXIgb2YgdGhlbQphdHRhY2hlcyB0byBhbnl0aGluZzoKCmBgYHRzCmV4cG9ydCB0eXBlIFNlc3Npb25SZWNvdmVyeVRhcmdldCA9CiAgfCB7IG1vZGU6ICduYXRpdmUnOyAgIGFnZW50OiBBZ2VudElkOyB2ZXJzaW9uOiBzdHJpbmc7IGN3ZD86IHN0cmluZzsgcmVhc29uOiBzdHJpbmcgfQogIHwgeyBtb2RlOiAnY29udGludWUnOyBhZ2VudDogQWdlbnRJZDsgdmVyc2lvbjogc3RyaW5nOyByZWFzb246IHN0cmluZyB9OwpgYGAKCmBuYXRpdmVgID0gdGhlIGhhcm5lc3MncyBvd24gYC0tcmVzdW1lYC4gYGNvbnRpbnVlYCA9IGEgYC9jb250aW51ZWAgcmVwbGF5LiBCb3RoIGFyZSBhCioqbmV3IHByb2Nlc3MqKi4KCjxhc2lkZSBjbGFzcz0iYXJ0aWZhY3QtY2FsbG91dCI+PHN0cm9uZz5Mb2FkLWJlYXJpbmcgdGFrZWF3YXk6PC9zdHJvbmc+IHdoZW4geW91IHNhaWQgdGhlCmFnZW50ICJjb21lcyBiYWNrIGFzIGEgc3RyYW5nZXIiLCB0aGF0IHdhcyByZXN1bWUsIG5vdCBhdHRhY2guIFRoZSBzeXN0ZW0gc2lsZW50bHkKZGVncmFkZXMgZnJvbSBvbmUgdG8gdGhlIG90aGVyIGFuZCBuZXZlciBzYXlzIHNvIOKAlCB3aGljaCBpcyBSVVNILTMxMzksIGFuZCBpcyB0aGUgc2luZ2xlCmJpZ2dlc3Qgc291cmNlIG9mIHRoZSAiaXQgYmFyZWx5IHdvcmtzIiBmZWVsaW5nLjwvYXNpZGU+CgojIyMgVGhlIHZlcmJzIHRoYXQgYWN0dWFsbHkgZXhpc3QKCkZyb20gYGFnZW50cyBzZXNzaW9ucyAtLWhlbHBgIGFuZCB0aGUgY29tbWFuZCBzb3VyY2VzLCBub3QgdGhlIGRvY3M6Cgp8IFZlcmIgfCBXaGF0IGl0IHJlYWxseSBkb2VzIHwgTmVlZHMgYSBsaXZlIHByb2Nlc3M/IHwKfCAtLS0gfCAtLS0gfCAtLS0gfAp8IGBzZXNzaW9ucyByZXN1bWUgPGlkPmAgfCAqKlRoZSBvbmUgZnJvbnQgZG9vci4qKiBBdHRhY2hlcyBhIGxpdmUgcGFuZSBpZiB0aGVyZSBpcyBvbmUsIGVsc2UgcmVjb3ZlcnMuIGAtLWF0dGFjaC1vbmx5YCByZWZ1c2VzIHRvIGZhbGwgdGhyb3VnaCB8IG5vIHwKfCBgc2Vzc2lvbnMgZm9jdXNgIHwgT2xkZXIgc3BlbGxpbmcsIGhpZGRlbi4gU2FtZSBib2R5IOKAlCBgZm9jdXNBY3Rpb25gIHwgbm8gfAp8IGBzZXNzaW9ucyBhdHRhY2hgIHwgRGVwcmVjYXRlZCDihpIgYHJlc3VtZWAuIFdhczogc3RvcCB0aGUgaGVhZGxlc3MgY29udGludWF0aW9uLCBicmluZyBpdCBiYWNrIGludGVyYWN0aXZlIHwgbm8gfAp8IGBzZXNzaW9ucyBkZXRhY2ggPGlkPmAgfCBQYXJrIGEgbGl2ZSBhZ2VudCB0byBoZWFkbGVzcyDigJQga2VlcHMgd29ya2luZywgbm8gdGVybWluYWwgfCB5ZXMgfAp8IGBzZXNzaW9ucyBzdG9wIDxpZD5gIHwgRW5kIGl0IGFuZCB0ZWFyIGRvd24gaXRzIHRtdXgvbXV4IHNlc3Npb24gfCB5ZXMgfAp8IGBzZXNzaW9ucyBpbmplY3QgPGlkPiA8dGV4dD5gIHwgVHlwZSBpbnRvIHRoZSB0ZXJtaW5hbCBhIGxpdmUgc2Vzc2lvbiBsaXZlcyBpbiDigJQgaG93IHRoZSBkYWVtb24gd2F0Y2hkb2cgbnVkZ2VzIHwgeWVzIHwKfCBgc2Vzc2lvbnMgbWlncmF0ZSA8aWQ+YCB8IE1vdmUgYSBydW5uaW5nIHNlc3Npb24gdG8gYW5vdGhlciBtYWNoaW5lIHwgeWVzIHwKfCAqKHJlY29ubmVjdCBsb29wKSogfCBOb3QgYSB2ZXJiLiBSdW5zIGluc2lkZSBgYWdlbnRzIHJ1bmAsIGNhbGxzIGZvY3VzIG9uIGEgZHJvcHBlZCBsaW5rIHwg4oCUIHwKCiMjIyAiU2VsZWN0IHdoaWNoIHByb2dyYW0gdG8gcmVzdW1lIGludG8iIOKAlCBhbmQgbm8sIGl0IGRvZXMgbm90IG5lZWQgdG11eAoKVGhhdCBpcyB0aGUgKip0ZXJtaW5hbCBsYXVuY2ggZW5naW5lKiosIGBsaWIvdGVybWluYWwvYmFja2VuZHMvYDoKCmBgYApnaG9zdHR5LnRzICAgaXRlcm0udHMgICB0ZXJtaW5hbC1hcHAudHMgICB0bXV4LnRzICAgdnNjb2RpdW0tYWdlbnQudHMKYGBgCgoqKnRtdXggaXMgb25lIGJhY2tlbmQgb2YgZml2ZS4qKiBXaGVuIHlvdSBtdWx0aS1zZWxlY3QgaW4gYHNlc3Npb25zIHJlc3VtZWAsIGl0IGZhbnMgZWFjaApwaWNrIGludG8gYSB0YWIvc3BsaXQgdmlhIHdoaWNoZXZlciBiYWNrZW5kIGZpdHMg4oCUIFZTIENvZGl1bSwgR2hvc3R0eSwgaVRlcm0sIFRlcm1pbmFsLmFwcC4KVGhhdCBwYXRoIGlzIGEgKnJlc3VtZSogKG5ldyBwcm9jZXNzLCB0cmFuc2NyaXB0IHJlcGxheSksIHNvIGl0IHdvcmtzIHdpdGggdG11eCBlbnRpcmVseQphYnNlbnQuIFRoYXQgaXMgd2h5IGl0IGZlbHQgbGlrZSBhIHNlcGFyYXRlLCB3ZWlyZGVyIG1lY2hhbmlzbTogaXQgaXMgYSBkaWZmZXJlbnQKbWVjaGFuaXNtLCBhbmQgaXQgaXMgdGhlIG9uZSB0aGF0IGFsd2F5cyB3b3Jrcy4KCiMjIyBXaGF0IHN1cnZpdmVzIHdoaWNoIGludGVycnVwdGlvbgoKVGhlIHRhYmxlIHlvdSBhY3R1YWxseSBhc2tlZCBmb3IuIGBhZ2VudGAgPSB0aGUgaGFybmVzcyBwcm9jZXNzOyBgcGFuZWAgPSB0aGUgdG11eCBwYW5lCmhvbGRpbmcgaXQuCgp8IEludGVycnVwdGlvbiB8IEFnZW50IHwgUGFuZSB8IEF0dGFjaCBwb3NzaWJsZT8gfCBXaGF0IHlvdSBnZXQgdG9kYXkgfAp8IC0tLSB8IC0tLSB8IC0tLSB8IC0tLSB8IC0tLSB8CnwgTmV0d29yayBibGluaywgcmVtb3RlIGFnZW50LCAqKndyYXBwZWQqKiAocG9zdC1SVVNILTMxMjUpIHwgbGl2ZXMgfCBsaXZlcyB8ICoqeWVzKiogfCByZWNvbm5lY3QgbG9vcCByZS1hdHRhY2hlcyDigJQgbm8gbG9zcyB8CnwgTmV0d29yayBibGluaywgcmVtb3RlIGFnZW50LCB0bXV4IG9mZiAodG9kYXkncyBzaGlwcGVkIGNvZGUpIHwgKipkaWVzKiogfCDigJQgfCBubyB8IHJlcGxheSwgb3Igbm90aGluZyB8CnwgTmV0d29yayBibGluaywgYC0tcmF3YCAvIGAtLW5vLXRtdXhgIHwgKipkaWVzKiogfCDigJQgfCBubyB8IHJlcGxheSwgb3Igbm90aGluZyB8CnwgKipDbG9zZSB0aGUgVlMgQ29kaXVtIHRhYioqIHwgbGl2ZXMgfCBsaXZlcyB8ICoqeWVzKiogfCAqbm90aGluZyBoYXBwZW5zKiDigJQgdGhlIHJlY29ubmVjdCBsb29wIGRpZWQgd2l0aCB0aGUgdGFiIHwKfCAqKlZTIENvZGl1bSBjcmFzaGVzKiogfCBsaXZlcyB8IGxpdmVzIHwgKip5ZXMqKiB8IHNhbWUg4oCUIG9ycGhhbmVkLCBub3RoaW5nIHN1cmZhY2VzIGl0IHwKfCAqKllvdXIgbGFwdG9wIHJlYm9vdHMqKiwgYWdlbnQgaXMgb24gYSAqKnBlZXIqKiB8ICoqbGl2ZXMqKiB8ICoqbGl2ZXMqKiB8ICoqeWVzKiogfCAqbm90aGluZyBoYXBwZW5zKiDigJQgdGhpcyBpcyByZWNvdmVyYWJsZSBhbmQgbm9ib2R5IHRlbGxzIHlvdSB8CnwgKipZb3VyIGxhcHRvcCByZWJvb3RzKiosIGFnZW50IGlzICoqbG9jYWwqKiB8IGRpZXMgfCBkaWVzIHwgKipubyoqIHwgcmVwbGF5IG9ubHkgfAp8IFBlZXIgcmVib290cyB8IGRpZXMgfCBkaWVzIHwgbm8gfCByZXBsYXkgb25seSB8CnwgQWdlbnQgZXhpdHMgb24gaXRzIG93biB8IGRpZXMgfCBwYW5lIGtlcHQgKGByZW1haW4tb24tZXhpdGApIHwgbm8gfCByZXBsYXkgfAoKVHdvIHJvd3MgbWF0dGVyIG1vc3QsIGFuZCBib3RoIGFyZSB0aGUgc2FtZSBkZWZlY3Q6CgoqKllvdXIgcmVib290IHF1ZXN0aW9uLCBwcmVjaXNlbHk6KiogaWYgdGhlIGFnZW50IHdhcyAqKmxvY2FsKiosIG5vIOKAlCB0aGUgdG11eCBzZXJ2ZXIgaGFzCm5vIGxhdW5jaGQgdW5pdCAoYH4vTGlicmFyeS9MYXVuY2hBZ2VudHMvYCBob2xkcyBgYWdlbnRzLWRhZW1vbmAsIGBhZ2VudHMtbWVudWJhcmAsCmBjb21wdXRlci1oZWxwZXJgLCBgd2hhdHNhcHAtYnJpZGdlYCDigJQgbm8gdG11eCksIHNvIHRoZSBzZXJ2ZXIgZGllcyB3aXRoIHRoZSBtYWNoaW5lIGFuZAphdHRhY2ggaXMgaW1wb3NzaWJsZS4gUmVwbGF5IGlzIGFsbCB0aGVyZSBpcy4KCkJ1dCBpZiB0aGUgYWdlbnQgd2FzIG9uIGEgKipwZWVyKiog4oCUIHdoaWNoIGlzIGhvdyB5b3UgYWN0dWFsbHkgd29yayDigJQgeW91ciBsYXB0b3AKcmVib290aW5nIGRvZXMgbm90IHRvdWNoIGl0LiBUaGUgcGVlcidzIHRtdXgga2VlcHMgcnVubmluZyBhbmQgdGhlIGFnZW50IGlzIHN0aWxsIHRoZXJlLApzdGlsbCBhdHRhY2hhYmxlLCAqKmZ1bGx5IHJlY292ZXJhYmxlIHdpdGggemVybyBsb3NzKiouIFRvZGF5IG5vdGhpbmcgdGVsbHMgeW91IHRoYXQsIGFuZApub3RoaW5nIGdvZXMgYW5kIGdldHMgaXQuIFRoYXQgaXMgdGhlIGRhZW1vbiBnYXAuCgojIyMgdG11eCwgZm9yIHVzZXJzIHdobyBkbyBhbmQgZG8gbm90IGFscmVhZHkgdXNlIGl0CgpZb3Ugd2VyZSByaWdodCB0byB3b3JyeSBhYm91dCBib3RoLCBhbmQgdGhlIGNvZGUgYWxyZWFkeSBhbnN3ZXJzIG9uZSBvZiB0aGVtIHdlbGwuCgoqKkV4aXN0aW5nIHRtdXggdXNlcnM6IHNhZmUsIGJ5IGRlc2lnbi4qKiBUd28gbWVjaGFuaXNtczoKCjEuICoqU2VwYXJhdGUgc2VydmVyLioqIFdlIHJ1biBvbiBvdXIgb3duIHNvY2tldCAoYH4vLmFnZW50cy8uY2FjaGUvaGVscGVycy90bXV4L3NlcnZlci5zb2NrYCwKICAgYGxpYi90bXV4L3BhdGhzLnRzOjE4YCksIHNvIHlvdXIgb3duIHRtdXggc2VydmVyLCBzZXNzaW9ucyBhbmQgd2luZG93cyBhcmUgdW50b3VjaGVkLgoyLiAqKllvdXIgY29uZmlnIHN0aWxsIHdpbnMuKiogYHdyaXRlU3RhcnR1cENvbmZpZ2AgKGBsaWIvdG11eC9zZXNzaW9uLnRzOjU0YCkgd3JpdGVzIG91cgogICBkZWZhdWx0cyAqZmlyc3QqLCB0aGVuIGBzb3VyY2UtZmlsZSAtcWAgZXZlcnkgY29uZmlnIHRtdXggaXRzZWxmIHdvdWxkIGhhdmUgbG9hZGVkIOKAlAogICBhbmQgaXQgZGVsaWJlcmF0ZWx5IHNvdXJjZXMgKiphbGwqKiBvZiB0aGVtLCBub3QganVzdCB0aGUgZmlyc3Q6CgogICA+IHRtdXgncyBvd24gYHN0YXJ0X2NmZygpYCBzb3VyY2VzIEVWRVJZIGVudHJ5IG9mIGBUTVVYX0NPTkZgIHRoYXQgZXhpc3RzLCBub3QganVzdCB0aGUKICAgPiBmaXJzdCDigKYgU291cmNpbmcgb25seSB0aGUgZmlyc3Qgd291bGQgc2lsZW50bHkgZHJvcCB0aGUgc2Vjb25kIGFuZCBicmVhayB0aGUgIm5ldmVyCiAgID4gb3ZlcnJpZGUgYSB1c2VyLXNldCB2YWx1ZSIgY29udHJhY3QgdGhpcyBmaWxlIGV4aXN0cyB0byBrZWVwLgoKICAgQ29uZmlnIGZpbGVzIGV4ZWN1dGUgaW4gb3JkZXIsIHNvIG91cnMgYXJlIGRlZmF1bHRzIGFuZCBldmVyeSBvcHRpb24gb3IgYmluZGluZyB5b3Ugc2V0CiAgIG92ZXJyaWRlcyB0aGVtLgoKKipVc2VycyB3aG8gZG9uJ3Qga25vdyB0bXV4OiB0aGUgZ2FwIHlvdSBwcmVkaWN0ZWQgaXMgcmVhbC4qKiBUaGUgZGVmYXVsdHMgYXJlIGNob3NlbiBmb3IKdGhlbSDigJQgYG1vdXNlIG9uYCwgYHNldC1jbGlwYm9hcmQgb25gLCAxMDBrIGhpc3RvcnksIGNvcHktbW9kZSBkcmFnLXRvLWNvcHkKKGBzZXNzaW9uLnRzOjc5LTg0YCkg4oCUIHNvIHNjcm9sbGluZyBhbmQgc2VsZWN0aW5nIGJlaGF2ZSBub3JtYWxseS4gQnV0IHRoZXJlIGlzICoqbm8KYHN0YXR1cyBvZmZgKiosIHNvIHRoZXkgZ2V0IGEgdG11eCBzdGF0dXMgYmFyIGF0IHRoZSBib3R0b20gb2YgdGhlaXIgYWdlbnQgdGFiIGFuZCBhCnByZWZpeCBrZXkgdGhleSBoYXZlIG5ldmVyIGhlYXJkIG9mLiBGb3Igc29tZW9uZSB3aG8gZGlkIG5vdCBvcHQgaW50byB0bXV4LCB0aGF0IGlzIGEKdmlzaWJsZSwgY29uZnVzaW5nIGFydGlmYWN0IG9mIGFuIGltcGxlbWVudGF0aW9uIGRldGFpbC4KCioqTGVha2VkIHByb2Nlc3NlczogYWxyZWFkeSBzb2x2ZWQsIGJldHRlciB0aGFuIEkgZXhwZWN0ZWQuKiogYGxpYi90bXV4L29ycGhhbi1yZWFwLnRzYAooUlVTSC0yNTIxKSByZWFwcyBoZWxwZXJzIGFuIGV4aXRlZCBhZ2VudCBsZWF2ZXMgYmVoaW5kLCBhdHRyaWJ1dGluZyB0aGVtICoqYnkgZW52aXJvbm1lbnQqKgpyYXRoZXIgdGhhbiBwaWQgYW5jZXN0cnkg4oCUIGJlY2F1c2UgZXZlcnkgb2J2aW91cyBoYW5kbGUgaXMgZGVzdHJveWVkIGJ5IHRoZSB2ZXJ5IGV2ZW50CmJlaW5nIGRldGVjdGVkOgoKPiAqKnBwaWQgYW5jZXN0cnkqKiDigJQgYW4gb3JwaGFuIGlzIHJlcGFyZW50ZWQgdG8gaW5pdCB0aGUgaW5zdGFudCBpdHMgcGFyZW50IGRpZXMg4oCmCj4gKipjb250cm9sbGluZyB0ZXJtaW5hbCoqIOKAlCBQT1NJWCBkaXNhc3NvY2lhdGVzIGl0IOKApiAqKnByb2Nlc3MgZ3JvdXAqKiDigJQgdGhlIGhlbHBlcnMgdGhhdAo+IHN1cnZpdmUgYXJlIHByZWNpc2VseSB0aGUgb25lcyB0aGF0IGxlZnQgdGhlIHBhbmUncyBncm91cC4KCk1lYXN1cmVkIG1vdGl2YXRpb24gaW4gdGhhdCBmaWxlOiBvbmUgcGFuZSBob2xkaW5nICoqMi41IEdCKiogb2YgQ2xhdWRlIENvZGUgYmFja2dyb3VuZApkYWVtb25zIDIyIGRheXMgYWZ0ZXIgaXRzIHNlc3Npb24gZW5kZWQsIGFuZCAzNCBvcnBoYW5lZCBgY2dyYXBoLW1jcCAtLWRhZW1vbmAgcHJvY2Vzc2VzIG9uCmEgc2luZ2xlIHdvcmtlci4gVGhlIGRhZW1vbiBzd2VlcHMgdGhpcyBldmVyeSA1IG1pbnV0ZXMuCgojIyBFdmlkZW5jZQoKIyMjIFdoYXQgaXMgYWN0dWFsbHkgYnJva2VuCgpOb3QgdGhlIG1lY2hhbmlzbXMuIEVhY2ggd29ya3MuIFRocmVlIHRoaW5ncyBhcmUgbWlzc2luZyBiZXR3ZWVuIHRoZW06CgoxLiAqKk5vYm9keSBvd25zIGFuIG9ycGhhbmVkLWJ1dC1hbGl2ZSBzZXNzaW9uLioqIENsb3NlIHRoZSB0YWIsIGNyYXNoIFZTIENvZGl1bSwgcmVib290CiAgIHlvdXIgbGFwdG9wIOKAlCB0aGUgcmVtb3RlIGFnZW50IGlzIGZpbmUgYW5kIGF0dGFjaGFibGUsIGFuZCBub3RoaW5nIG5vdGljZXMgb3Igb2ZmZXJzIGl0LgogICBUaGUgcmVjb25uZWN0IGxvb3AgY2FuJ3Q6IGl0IGxpdmVkIGluIHRoZSB0YWIuCjIuICoqUmVzdW1lIG1hc3F1ZXJhZGVzIGFzIGF0dGFjaC4qKiBXaGVuIHRoZSBwYW5lIGlzIGdvbmUsIGBmb2N1c2Agc2lsZW50bHkgZmFsbHMgdGhyb3VnaAogICB0byByZXBsYXkuIFNhbWUgdmVyYiwgY29tcGxldGVseSBkaWZmZXJlbnQgb3V0Y29tZSwgbm8gbm90aWNlLiAoUlVTSC0zMTM5LikKMy4gKipOb24tdG11eCB1c2VycyBzZWUgdG11eC4qKiBUaGUgd3JhcCBpcyBhbiBpbXBsZW1lbnRhdGlvbiBkZXRhaWwgbGVha2luZyBpbnRvIHRoZSBVSSBhcwogICBhIHN0YXR1cyBiYXIgYW5kIHVuZmFtaWxpYXIga2V5cy4KCiMjIFJlY29tbWVuZGF0aW9uCgoqKk93biB0aGUgb3JwaGFuIGluIHRoZSBkYWVtb24sIGFuZCBuZXZlciBsZXQgcmVzdW1lIHByZXRlbmQgdG8gYmUgYXR0YWNoLioqCgotIFRoZSBkYWVtb24gYWxyZWFkeSBzd2VlcHMgdG11eCBwYW5lcyBldmVyeSA1IG1pbnV0ZXMgYW5kIGFscmVhZHkgcnVucyB0aGUgd2F0Y2hkb2cuIEdpdmUKICBpdCBvbmUgbW9yZSBzdGF0ZTogYSBzZXNzaW9uICoqYWxpdmUgb24gYSBwZWVyIHdpdGggbm8gY2xpZW50IGF0dGFjaGVkKiouIE9uIGJvb3QgaXQKICBzaG91bGQgZmluZCB0aGVzZSDigJQgdGhhdCBpcyBleGFjdGx5IHRoZSBwb3N0LXJlYm9vdCBjYXNlLCBhbmQgaXQgaXMgdGhlIG9uZSB3aGVyZSBhdHRhY2gKICBzdGlsbCB3b3JrcyBhbmQgdG9kYXkgZG9lcyBub3RoaW5nLgotIFN1cmZhY2UgdGhhdCBzdGF0ZSBmaXJzdCBpbiBgYWdlbnRzIHNlc3Npb25zYCBhbmQgdGhlIEZsZWV0IHBhbmVsOyByZS1hdHRhY2ggc3RheXMgYQogIHVzZXIgYWN0aW9uLCBuZXZlciBhbiBhdXRvbWF0aWMgdGFiLXJlb3Blbi4KLSBNYWtlIHRoZSBhdHRhY2gtdnMtcmVwbGF5IG91dGNvbWUgZXhwbGljaXQgYXQgZXZlcnkgY2FsbCBzaXRlOiBzYXkgKiJyZWpvaW5lZCB0aGUgbGl2ZQogIGFnZW50Iiogb3IgKiJ0aGUgcGFuZSB3YXMgZ29uZSDigJQgcmVwbGF5ZWQgdGhlIHRyYW5zY3JpcHQsIHRoZSBpbi1mbGlnaHQgdHVybiBpcyBsb3N0LiIqCi0gRm9yIG5vbi10bXV4IHVzZXJzLCBoaWRlIHRoZSBjaHJvbWU6IGBzdGF0dXMgb2ZmYCBvbiBvdXIgc2VydmVyIGJ5IGRlZmF1bHQsIHJlc3RvcmFibGUKICBmb3IgcGVvcGxlIHdobyB3YW50IGl0LiBUaGUgZHVyYWJpbGl0eSBpcyB0aGUgcG9pbnQ7IHRoZSBzdGF0dXMgYmFyIGlzIG5vdC4KCk5vbmUgb2YgdGhhdCByZXF1aXJlcyBtYWtpbmcgdXNlcnMgbGVhcm4gdG11eCwgYW5kIG5vbmUgb2YgaXQgY2hhbmdlcyB0aGVpciBjb25maWcuCg=="}</script>
+<script>
+(() => {
+  const root = document.documentElement;
+  const button = document.querySelector('.theme-toggle');
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  const configured = "system";
+  const stored = () => { try { const value = localStorage.getItem('artifacts-theme'); return value === 'light' || value === 'dark' ? value : null; } catch { return null; } };
+  const preferred = () => stored() || (configured === 'system' ? (media.matches ? 'dark' : 'light') : configured);
+  const apply = (theme, persist) => {
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    const next = theme === 'dark' ? 'light' : 'dark';
+    button.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+    button.setAttribute('title', 'Switch to ' + next + ' theme');
+    button.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    if (persist) { try { localStorage.setItem('artifacts-theme', theme); } catch {} }
+  };
+  apply(preferred(), false);
+  button.addEventListener('click', () => apply(root.dataset.theme === 'dark' ? 'light' : 'dark', true));
+  media.addEventListener('change', () => { if (configured === 'system' && !stored()) apply(media.matches ? 'dark' : 'light', false); });
+})();
+</script>
+</body>
+</html>
