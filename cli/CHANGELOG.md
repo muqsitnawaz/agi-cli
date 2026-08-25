@@ -1,5 +1,222 @@
 # Changelog
 
+## 1.22.49
+
+- **Check CLI benchmark numbers into `docs/benchmarks.md` (RUSH-2385).** Commander-bootstrap and audit-hook means from the yosemite-s1 vitest bench (PR #2349) plus pointers to OPT-01/OPT-02 live in git. Linear is not the ledger. Source: `cli/docs/benchmarks.md`.
+
+fix(view): keep Claude session/week quota slots aligned, render omitted windows as unavailable, and show only the unlabeled last-active timestamp
+
+- **No native binary ships in the npm tarball (RUSH-3100).** `Agents CLI.app` (2.6 MB) and
+  `MenubarHelper.app` (3.3 MB) were copied into `dist/` by `build`, listed in `files`, and
+  hard-gated by two `prepack` checks — so every Linux and Windows user downloaded 5.9 MB of
+  signed macOS bundles, and the tarball could only be packed on a Mac holding them. All
+  three are gone; helpers are fetched on demand from their own release tags and verified
+  exactly as before (sha256 + Developer ID team + notarization + designated-requirement
+  pin). Unpacked tarball: 21,337,724 → 15,629,419 bytes. `build` still clears any stale
+  bundle from `dist/` so an upgrade cannot leave one behind. This is what lets an ordinary
+  release be produced without a signing Mac: the prepack gates required the signed `.app`s
+  to be present at pack time, which is why the attestation was macOS-only. Both gate
+  scripts are retained — they remain the right check for cutting a *helper* release.
+  Source: `cli/package.json`.
+- **The attestation producer no longer seeds signed helper apps into its worktree
+  (RUSH-3100).** That seeding existed only because `prepack` refused to pack without them,
+  so it was the workaround for the coupling above; its comments claimed "the prepack gates
+  still decide … fails the pack exactly as before", which stopped being true the moment
+  those gates were removed. Source: `cli/scripts/release-attestation-produce.sh`.
+
+- **Trace storage can now be deployed from the CLI (RUSH-3140).** `agents traces setup` provisions the isolated `agents-traces` R2 bucket and Worker, uploads the canonical private trace Worker, binds its write and Phoenix identity secrets, enables its workers.dev route, and maps `traces.agents-cli.sh`.
+
+- **`agents traces sync` emits the rich Phoenix Evals index shard (RUSH-3142 M3).** The per-device `index.json` now carries duration/error stats, ranked sessions needing attention, derived topic counts, and structured tool-failure counts split into real failures, repository guards, and auto-mode permission denials recorded on failed tool calls. Topic classification uses only session metadata plus tool mix and is lazily cached in a self-healing `session_topics` table keyed by transcript mtime + size; per-session trajectory JSON and the incremental upload ledger are unchanged. Source: `apps/cli/src/lib/traces/{classify,sync}.ts`, `apps/cli/src/lib/session/db.ts`.
+
+- **The offloaded suite no longer unpacks inside your DotAgents repo.** `scripts/test.sh --device` shipped the tree to `~/.agents/test-runs/agents-cli` — but `~/.agents` is itself a git repo, so anything in the suite calling `git rev-parse --show-toplevel` resolved to `~/.agents` instead of the shipped tree (`release-manifest.test.ts` went looking for `~/.agents/native/computer-mac/Sources` and four tests failed with a confusing "helper input missing"), and the tree showed up as `?? test-runs/` in the operator's own repo status on every worker. The tree now lands in `~/.cache/agents-cli/test-runs/tree`, which has no git ancestor — the same reason `sandbox.sh`'s `~/workspaces` choice never hit this. The shipped tree is still given its own blank git repo, because parts of the suite resolve paths from a repo root and would otherwise hard-fail. Source: `apps/cli/scripts/test.sh`, `apps/cli/scripts/bound-repo-root.sh`.
+
+- **`scripts/test.sh` — the suite is offloaded by default and can no longer land on your machine by accident.** The full vitest suite pins a box for several minutes, and the only offloaded path used to be the `test:remote` package.json alias. Offloading was opt-in *at each call site* because `scripts/sandbox.sh` took a hand-composed command string rather than a verb, so every call site opted out: `scripts/build.sh` and `scripts/release-attestation-produce.sh` both ran `bun run test` on whatever machine invoked them. New `scripts/test.sh` is the one entry point — it offloads to a crabbox by default, takes `--device <box>` to run on any fleet Linux box, and runs locally only under an explicit, loudly-warned `--here`. When the offload target is unavailable it **fails naming the exact `--device` command** instead of silently falling back. `build.sh` and the attestation producer now both call it (the producer gains `--test-device` / `--test-here`), so a macOS signing box no longer doubles as the test runner just because a native helper needs notarizing. `sandbox.sh` gains the sibling projects' verb vocabulary (`sandbox.sh test`), which also fixes its bare default running `bun install && bun run test` at the monorepo root, where no test script exists. Source: `apps/cli/scripts/test.sh`, `apps/cli/scripts/sandbox.sh`, `apps/cli/scripts/build.sh`, `apps/cli/scripts/release-attestation-produce.sh`.
+
+- **A helper-only GitHub release no longer blocks the CLI release train.** `release-attestation-produce.sh` seeded its helper manifest from `gh release list --limit 1` — unconditionally the newest release. But not every release is a CLI release: the Windows computer-helper workflow publishes helper-only releases (assets `computer-helper-win.exe` + `.sha256`) into the same `v<version>` tag namespace. One of those shadows the last real CLI release, the manifest seed silently misses, every helper then reads as "changed", and the producer hard-fails on `computer-mac` — a helper it never rebuilds — with `helper computer-mac input changed but this producer never rebuilds it`. Observed live: `v1.22.48` (helper-only, published 09:54Z) shadowed `v1.22.47` and blocked the release. The seed now walks back through recent releases to the newest one that actually carries a `release-manifest.json`. Source: `apps/cli/scripts/release-attestation-produce.sh`.
+
+- **Watchdog, device-probe, self-heal, keychain-reap, and state-dir-check are now supervised daemon services (RUSH-3193 #3).** These five bare `setInterval` timers in `runDaemon()` are now `PeriodicService`s registered on `ServiceSupervisor`, alongside secrets-broker, browser-ipc, account-state, session-index, and monitors — each gets the same per-tick deadline, error boundary, and park/backoff circuit breaker, and now reports measured health through `agents daemon services` instead of an inferred `running (unsupervised)` label. `scheduler` and `webhook-receiver` remain outside the supervisor (neither fits the `PeriodicService` shape — see `cli/src/lib/daemon/AGENTS.md`). Source: `cli/src/lib/daemon/watchdog-service.ts`, `device-probe-service.ts`, `self-heal-service.ts`, `keychain-reap-service.ts`, `state-dir-check-service.ts`, `cli/src/lib/daemon/daemon.ts`.
+
+- **`agents daemon services` shows every service's live health, with live enable/disable/restart (RUSH-3193 #4).** The daemon `services` view now reports state / last-run / consecutive-failures / last-error for every supervised service (secrets-broker, browser-ipc, monitor-engine, account-state, session-index), not just the two socket services; `--json` gains the full service list while keeping the existing `secretsBroker`/`browserIpc` fields. `agents daemon services enable`/`disable`/`restart <id>` now take effect live through the supervisor instead of requiring a daemon restart. Source: `cli/src/commands/daemon.ts`, `cli/src/lib/daemon-services.ts`, `cli/src/lib/daemon/supervisor.ts`.
+
+- **Self-heal's staggered boot-time tick is restored (RUSH-3193 #17).** The `ServiceSupervisor` migration (RUSH-3193 #3) fired every periodic service's first tick immediately at daemon start, including self-heal — dropping the ~30s post-boot stagger the old inline timer used so shims/PATH could settle before self-heal's first sweep, without making daemon launch itself busy. `PeriodicService` gains an optional `startupDelayMs` (default 0, no change for other services); `SelfHealService` sets it to 30s. Also fixes a stale comment on `watchdog-service.ts` claiming an SSH fan-out that `runWatchdogPass` does not do (it's host-local). Source: `cli/src/lib/daemon/service.ts`, `cli/src/lib/daemon/supervisor.ts`, `cli/src/lib/daemon/self-heal-service.ts`, `cli/src/lib/daemon/watchdog-service.ts`.
+
+- **Usage refresh is per-device — the `usage.primary-host` broadcast is gone (RUSH-3193 #15).** Every host now reads its own usage directly from the provider APIs, so the old model where one primary device fetched fleet usage and SSH-broadcast a token-free derived envelope for subscribers to import is removed. The `usage.primary-host` config key (and its `interactive.host` fallback for usage) is deleted, along with the publisher/subscriber role split; each daemon runs the local usage refresh on every host. Source: `cli/src/lib/daemon-ticks.ts`, `cli/src/lib/usage-fleet.ts`, `cli/src/lib/usage-refresh.ts`, `cli/src/lib/device-config.ts`, `cli/src/lib/config-keys.ts`.
+
+- **Daemon service supervisor: per-service contract, error boundaries, deadlines, health (RUSH-3193 P1).** The daemon's background services used to be bare `setInterval` closures sharing one event loop — a throw escaping a tick's local try/catch killed the whole daemon, and a hung tick (an unbounded SSH/keychain await) latched its overlap guard forever, silently freezing that one service for the daemon's life (observed ~51h). A new `DaemonService`/`PeriodicService` contract plus a `ServiceSupervisor` give every registered service its own timer, a per-service error boundary that can never propagate to `process.exit`, and a hard per-tick deadline that always releases the overlap guard even when the tick itself hangs; repeated failures park the service and retry it with exponential backoff while every sibling service keeps ticking, and `supervisor.health()` reports state/last-run/consecutive-failures for every registered service. The session-index warm service is migrated onto it as the first proof of concept — `agents daemon services list` now shows it as `session-index`. Other background services are unchanged; they migrate in follow-up PRs. Source: `cli/src/lib/daemon/{service,supervisor,session-index-service}.ts`, `cli/src/lib/daemon/daemon.ts`, `cli/src/lib/daemon-services.ts`.
+
+- **Managed Cursor accounts now use the account they display (RUSH-3196).** Cursor runs and direct version aliases force Cursor's HOME-relative file credential store (`~/.cursor/auth.json`) inside the selected version home instead of silently falling through to one macOS Keychain login. Stale `cli-config.json` metadata no longer counts as signed in; existing Keychain credentials are left untouched and an unseeded managed version asks for Cursor's normal login flow.
+
+- **Grok billing events now reach `agents view` (RUSH-3197).** The daemon publishes freshly collected local-event snapshots instead of rejecting every `last_seen` source as a failed refresh. Current Grok weekly meters cache normally; an expired or missing event tells the operator which `grok@version` to run once rather than leaving a silent plan-only gap.
+
+- Rebuilt the internal documentation as a compact architecture and decisions corpus, with command syntax remaining generated from the CLI.
+
+### Added
+
+- `agents devices pick` — prints the device automatic placement would choose for
+  offloaded machine work: the least-loaded reachable POSIX box from the same auto
+  pool `agents run --device auto` draws from, so `role=worker` / `role=personal`
+  marks govern it. The name alone goes to stdout so scripts can consume it
+  (`box="$(agents devices pick)"`); candidates and load go to stderr. `--json`
+  adds every candidate and each exclusion reason. Fails loud with the excluded
+  devices named when no worker is eligible — it never answers "run it locally".
+
+### Changed
+
+- `scripts/test.sh` now **auto-picks a fleet worker by default** instead of
+  requiring crabbox. `--device auto` says the same thing explicitly, `--crabbox`
+  selects the previous disposable-crabbox path, and `--device <box>` / `--here`
+  are unchanged. The old default needed the crabbox binary plus provider
+  credentials, so the no-argument invocation failed on any box without them. An
+  auto-pick that lands on the local machine runs in place without the `--here`
+  warning when that machine is itself a pool worker.
+- `scripts/release-attestation-produce.sh` gains `--test-crabbox`, so all three of
+  `test.sh`'s lanes are reachable from a release. It previously exposed only
+  `--test-device` and `--test-here`, leaving a release on a box with no fleet worker
+  in reach unable to ask for the disposable crabbox it can still use.
+
+### Changed
+
+- **Native helper downloads are decoupled from the CLI release.** `helper-download.ts`
+  used to build `releases/download/v${cliVersion}/<asset>`, keying every helper to the
+  CLI's own tag. That was coupled in both directions: a CLI release had to re-stage every
+  helper asset onto its new tag or the download 404'd, and a helper fix could not reach
+  anyone without cutting a CLI release. Helpers now publish to their own tags
+  (`menubar/v1.0.0`, `keychain/v1.0.0`, `computer-mac/v…`) and the CLI records a
+  per-helper **floor** in `helper-versions.ts` — the build it was tested against, and the
+  immutable tag it falls back to offline.
+
+### Fixed
+
+- **The keychain helper download could never have worked.** GitHub rewrites a space in a
+  release-asset name to a dot on upload, so an asset staged as `Agents CLI.app.zip` is
+  served as `Agents.CLI.app.zip` while the CLI requested the spaced name — a permanent
+  404. The asset is now published as **`Agents_CLI.app.zip`**: a name GitHub preserves
+  verbatim, chosen deliberately rather than mirroring GitHub's rewrite (matching
+  `Agents.CLI.app.zip` would work only for as long as that normalization rule holds).
+  `helperAssetUrls` additionally refuses any spec whose asset name contains a space,
+  rather than minting a URL that cannot resolve. The extracted bundle directory keeps its
+  space (`Agents CLI.app`) — that is the on-disk bundle name macOS and the TCC grant key
+  on, and it is unchanged.
+
+- **The Windows helper exe is decoupled too.** `ssh-tunnel.ts` is a separate
+  implementation that never routed through `helper-download.ts`, and it still keyed
+  `computer-helper-win.exe` to `v${cliVersion}` — the identical coupling, meaning every
+  CLI release had to re-stage a ~165 MB binary or the download 404'd. It now resolves
+  `computer-win/v<x.y.z>` from the same floor table.
+
+### Removed
+
+- **`release.sh` no longer stages helper fallback assets onto the CLI's own tag, and no
+  longer gates a release on one.** With helpers resolving from their own tags, those
+  assets were work nothing reads — and the keychain one was republished on every release
+  under `Agents CLI.app.zip`, a name GitHub rewrites to a dot and no client can fetch.
+  The hard `die` on a missing `ComputerHelper.app.zip` is gone with them: it would have
+  failed an otherwise-good release over an asset the runtime no longer consults.
+
+### Fixed
+
+- **The menu-bar helper build could emit a Developer-ID-signed bundle that was never
+  notarized, and say nothing.** Notarization was gated on
+  `[ "$MODE" = "release" ] && [ "$SIGN_ID" != "-" ]`, so any invocation without the
+  `release` argument on a machine holding a Developer ID produced a real signed bundle,
+  passed every self-test, and exited 0 — while `spctl` reported
+  `rejected / source=Unnotarized Developer ID` with no stapled ticket. Gatekeeper on
+  macOS 26+ rejects such a bundle as "damaged" and crashes AppKit at launch. The three
+  credential guards meant to fail loud on missing Apple creds also lived *inside* that
+  branch, so they were unreachable in exactly the case that needed them. The gate is now
+  the signature (`[ "$SIGN_ID" != "-" ]`): a Developer-ID signature always implies
+  notarization, whatever the mode. Ad-hoc builds are unchanged — they cannot be notarized
+  by construction and `prepack` already stops them shipping.
+
+  A credential-less **debug** build on a machine that holds a Developer ID now signs
+  ad-hoc (with the `.dev` bundle id) instead of failing: `SIGN_ID` is auto-detected from
+  the keychain, so demanding notary creds unconditionally would have broken the local
+  build loop on every signing-capable Mac. The downgrade is resolved before `Info.plist`
+  is written — a late one would emit an ad-hoc bundle carrying the *production* bundle id
+  and poison the user's Accessibility grant. `MENUBAR_HELPER_SIGN_ID=-` remains the
+  explicit opt-out and is now documented in the script.
+
+### Fixed
+
+- **The full test suite was red on `main`, and pull-request CI could not see it.** A
+  top-level `await import('bun:sqlite')` in `src/lib/sqlite.ts` made that module
+  un-lowerable to CJS, so every test that spawns a subprocess through `tsx` died at
+  transform time with `Top-level await is currently not supported with the "cjs" output
+  format` — 49 failures across 7 files, none of which touch SQLite. Both runtime arms now
+  load through `createRequire`, so there is no top-level await to lower. The specifier is
+  held in a variable rather than written inline, keeping the off-Bun collector from trying
+  to resolve a module that only exists under Bun (what the old `as string` cast did for
+  the dynamic import).
+
+  This mattered beyond the suite: `release-attestation-produce.sh` runs the **full** suite
+  fail-closed, while PR CI runs only the tests selected for a diff. A failure outside every
+  recent diff's selection is therefore invisible until release time, where it blocks the
+  attestation and with it any publish.
+
+### Fixed
+
+- **Restored operator-facing master-key custody guidance to `docs/secrets.md`.** The
+  docs reset (`2d96d05d6`) rewrote the page from a manual into an architecture summary and
+  dropped the section that names the machine-local key path
+  (`~/.agents/.secrets-key/passphrase`), states that resolution is non-interactive, points
+  headless sync at `AGENTS_SYNC_PASSPHRASE` rather than the master key, and **forbids
+  exporting the master key from a shell rc file** — the exact advice that caused RUSH-1968
+  on seven machines. Four `docs-hygiene` guards had been failing ever since, which is the
+  alarm working as designed rather than test staleness.
+- **Restored the `**Severity rubric**` section to `docs/observability.md`**, removed by the
+  same reset. `doctor-findings.test.ts` pins this prose copy against `FINDING_SEVERITY`, so
+  its absence meant the docs-cannot-drift guard was simply not running.
+- **`add-targets-user-repo.test.ts` no longer enumerates the `state.js` surface.** Its
+  partial mock hand-listed every export, so adding `getCliVersionCachePath` to `state.ts`
+  took the whole file down with `No "getCliVersionCachePath" export is defined on the mock`.
+  It now spreads `importActual` and overrides only the directory resolvers it redirects, so
+  a new export cannot break it again.
+
+- **`release.sh --with-helpers` — an ordinary release publishes the CLI and nothing else
+  (RUSH-3216).** Two couplings survived helpers moving to their own tags, and both are now
+  behind this opt-in (default off): staging `ComputerHelper.app.zip` onto the CLI's
+  `v<version>` tag, which publishes an asset no client requests; and
+  `release-manifest.sh require`, which re-derives every helper's input digest and aborts
+  when one moved without a rebuild — failing a good CLI release over Swift the CLI does not
+  ship. Source: `cli/scripts/release.sh`.
+- **A new `release.sh` flag is inert until it is merged (RUSH-3216).** `release.sh` execs
+  `release-worktree.sh`, which checks out `origin/<default>` and re-runs the script from
+  there, so the second parse is the merged copy and an unmerged flag dies as `unknown
+  flag` even though the local parser handles it. Pass `--orchestration-phase` to skip the
+  re-exec when exercising a new flag pre-merge. Source: `cli/scripts/release.sh`.
+
+- **Managed share URLs use your Phoenix handle, not a UUID (RUSH-3224).** `agents artifacts share` now publishes to `share.agents-cli.sh/<handle>/<slug>` where `<handle>` is the local-part of the signed-in email (`muqsitnawaz@gmail.com` → `muqsitnawaz`), and the default slug is `<readable>-<16hex>` (a short view-id). Owner metadata is still the Phoenix userId; the Worker 403s a PUT to someone else's handle and 409s if two accounts collide on the same local-part. HTML publishes rewrite Chrome-saved `file://…#section` TOC links to in-page hashes and inline local sibling images as data URIs, so a self-contained plan (including a 1 MB page with embedded screenshots) stays viewable after upload. Source: `cli/src/lib/share/{backend,worker-template,html,publish}.ts`.
+
+- **A remote interactive `--device` run now prints its session id as it connects (RUSH-3227).** When Claude (or a resume) already has a real id before the TTY is taken, stderr shows `Session <uuid> on <host>` and `agents sessions resume <uuid>` so the id exists while the connection is live, not only after OpenSSH closes. A launch id is not printed as a session id. Source: `cli/src/lib/hosts/reconnect.ts`, `cli/src/commands/exec.ts`.
+
+- **A remote interactive session that closes now prints its id (RUSH-3227).** After `agents run --device` (including `--raw`), `sessions focus`/`resume` over SSH, or a remote tmux attach ends, the CLI writes the full session id and `agents sessions resume <id>` under OpenSSH's `Shared connection … closed.` line, so a dropped tab is not a bare shell. Auto-reconnect still swallows the 255 it will retry; this fires only when the user is actually back locally. Source: `cli/src/lib/hosts/reconnect.ts`, `cli/src/commands/{exec,go,focus,resume,attach,sessions}.ts`, `cli/src/lib/session/remote/remote-list.ts`.
+
+- **Re-pin the keychain helper to the binary that actually shipped in 1.22.47.** `scripts/verify-keychain-helper.sh` compared `bin/Agents CLI.app` to `beb02d…`, but `@phnx-labs/agents-cli@1.22.47` and `keychain/v1.0.0` both contain `a49080…`. Linux `npm pack` therefore died at prepack and blocked every release attestation. Same class of fix as #835 / #912. Source: `cli/scripts/Agents CLI.app.sha256`.
+
+- **A session with no observer no longer reports as healthy (RUSH-3125).** `classifyHostLink` decides a session's host link from two local signals — the owning IDE window's heartbeat and tmux's attached-client count — and when it had *neither* it fell through to `connected`. That is the wrong default for a detector: the rows it silently blessed were exactly the ones with no observer (a bare terminal, a team spawn, a cloud task, or any `--device` session whose pane lives on another machine, since every signal it reads is local). There is now an `unknown` link, which says the question is open rather than answering it; `connected` is returned only on positive evidence — a counted client or a republishing window. `unknown` is not a loss signal: it never promotes a status, and it no longer clears a derived `attached` presence, so a plain terminal session you are sitting in keeps its marker. Everything else is unchanged and deliberately so — a deliberate `agents sessions detach` is still excluded first, `tmuxClients === 0` is still authoritative, an absent client count still never reads as zero, and per SES-18a a `running` session still keeps its status. Source: `cli/src/lib/session/host-link.ts`, `cli/src/lib/session/active.ts`, spec SES-18a.
+
+- **A tmux status bar can show which agent session a pane is running — and never a fabricated one.** `agents run` wraps an interactive agent in a tmux session named `ag-<agent>-<8 chars>`, built from `(options.sessionId ?? randomUUID()).slice(0, 8)` (`cli/src/lib/exec.ts`). Reading those 8 characters as a session id is quietly wrong: the launcher pre-assigns an id only for Claude, so on a box running two harnesses `ag-claude-c8c4a2c8` carries a real, resumable short id while `ag-codex-364cd550` carries a throwaway that resolves to nothing — and the two are indistinguishable on sight. `createSession` now stamps two session-scoped tmux user options, `@ag_session_id` and `@ag_agent`, so a format like `#{?#{@ag_session_id},#{@ag_session_id},#{@ag_agent}}` renders a real handle where one exists and falls back to the harness name where none does, instead of printing something `agents sessions <id>` would reject. The id is published only when the harness actually *received* it — a new `isHarnessKnownSessionId` mirrors the two branches in `buildExecCommand` that put an id on the command line (a native resume on any harness with a `resume` spec, and Claude's create-with-`--session-id`), so `agents run codex --session-id X` without `--resume`, where X never reaches codex, correctly publishes nothing. This is the in-tmux counterpart to the existing name-parsing recovery tier (`shortIdFromName` + `resolveNamesToSessionIds` in `cli/src/lib/session/active.ts`), which validates a short id against the session DB; a tmux format cannot do a DB lookup, so the option carries the answer instead. Best-effort throughout: a failed stamp never fails a launch, and an unset option renders empty. Source: `cli/src/lib/tmux/session.ts`, `cli/src/lib/exec.ts`.
+
+### traces: drift signal for topic buckets
+
+`agents traces sync` now computes a **drift signal** for each topic bucket by comparing today's error and stall rates against a 14-day rolling history stored inside the shard. Buckets that cross a 0.20 absolute-delta threshold are marked `degrading` or `improving`; the rest are `stable`. Buckets with fewer than 3 historical days are skipped to avoid noise on fresh deployments.
+
+The shard now carries two new fields:
+
+- `bucketHistory` — rolling 14-day array of per-bucket `BucketStats` (errorRate, stallRate)
+- `driftSignals` — `DriftSignal[]` for the current sync, sorted by errorDelta descending
+
+`--dry-run --out <dir>` seeds history from the previously written `index.json` in the output directory, so successive local runs accumulate signal without hitting the network.
+
+- `agents traces sync --dry-run --out <dir>` computes the derived trace shards
+  from your local `sessions.db` and writes them to a directory — no Phoenix
+  sign-in, no worker, no upload — so you can verify your real trajectories
+  before the hosted path is wired.
+- The per-session drill-down (`sessions/<id>.json`) now emits a `SessionDetail`
+  (a `meta` summary — spanMs/turns/tools/errorCount/tokens/cost/outcome/repo —
+  plus a plain-language `whereItWentWrong`) that the Phoenix Evals console
+  consumes directly, instead of the raw internal trajectory shape.
+
 ## 1.22.48
 
 - **On your own machine, every Claude run uses your normal login — not the
