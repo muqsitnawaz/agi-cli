@@ -4,6 +4,11 @@ title: "Make the docs explain the system, not recite the repository"
 summary: "The 58 Markdown files under apps/cli/docs have grown into a 27,829-line mixture of architecture, CLI manuals, setup guides, source maps, raw transcripts, implementation plans, and volatile product research. This plan keeps durable feature behavior and architectural decisions in the authored corpus, generates mechanically derivable reference, and moves task-oriented instructions into a separate user/runbook surface."
 status: draft
 context: "RUSH-3199 · apps/cli/docs architecture reset"
+links:
+  - label: "RUSH-3199"
+    url: "https://linear.app/rush/issue/RUSH-3199"
+  - label: "PR #3038"
+    url: "https://github.com/phnx-labs/agi-cli/pull/3038"
 facts:
   - "58 Markdown files audited; 27,829 lines total"
   - "12 feature docs carry hand-maintained Command Reference sections"
@@ -224,4 +229,5 @@ Every authored feature document should be recognizable without reading its filen
 ### Tracking
 
 - Linear: **RUSH-3199 — Refocus apps/cli/docs on architecture and durable decisions**
+- Pull request: **#3038 — docs(plan): reset the architecture documentation corpus**
 - Delivery model: one worktree and PR for the plan plus implementation, with domain-sized commits, CI, non-author review, merge, and post-merge verification.
