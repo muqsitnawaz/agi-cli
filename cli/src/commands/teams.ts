@@ -610,11 +610,23 @@ async function warnUnsignedTeammates(mgr: AgentManager, team: string): Promise<v
   }
 }
 
-/** Single-wave start used by `teams start` without --watch. */
-async function runOneWave(mgr: AgentManager, team: string, json: boolean): Promise<void> {
+/**
+ * Single-wave start used by `teams start` without --watch. startReady()
+ * terminalizes a placement/spawn/cloud/dependency failure to FAILED with
+ * evidence rather than leaving it PENDING, so a teammate that failed this wave
+ * appears in neither `launched` nor `still_pending` — it must be diffed against
+ * the pre-wave roster and reported explicitly, or the wave reads as a success.
+ * A wave that only produced failures sets a non-zero exit code.
+ */
+export async function runOneWave(mgr: AgentManager, team: string, json: boolean): Promise<void> {
+  const preWavePending = new Set(
+    (await mgr.listByTask(team)).filter((a) => a.status === 'pending').map((a) => a.agentId)
+  );
   const launched = await mgr.startReady(team);
   const all = await mgr.listByTask(team);
   const stillPending = all.filter((a) => a.status === 'pending');
+  const failed = all.filter((a) => a.status === 'failed' && preWavePending.has(a.agentId));
+  if (failed.length > 0 && launched.length === 0) process.exitCode = 1;
 
   if (json) {
     console.log(
@@ -622,12 +634,13 @@ async function runOneWave(mgr: AgentManager, team: string, json: boolean): Promi
         team,
         launched: launched.map((a) => ({ agent_id: a.agentId, name: a.name, after: a.after })),
         still_pending: stillPending.map((a) => ({ agent_id: a.agentId, name: a.name, after: a.after })),
+        failed: failed.map((a) => ({ agent_id: a.agentId, name: a.name, after: a.after, failure: a.failure })),
       }, null, 2)
     );
     return;
   }
 
-  if (launched.length === 0 && stillPending.length === 0) {
+  if (launched.length === 0 && stillPending.length === 0 && failed.length === 0) {
     console.log(chalk.gray(`No pending teammates in team ${team}.`));
     return;
   }
@@ -638,6 +651,15 @@ async function runOneWave(mgr: AgentManager, team: string, json: boolean): Promi
       const who = fullName(a.agentType as AgentType, a.version);
       const h = a.name || shortId(a.agentId);
       console.log(`  ${chalk.cyan(h)}  ${who}`);
+    }
+  }
+  if (failed.length > 0) {
+    if (launched.length > 0) console.log();
+    console.log(chalk.red(`Failed this wave (${failed.length}):`));
+    for (const a of failed) {
+      const h = a.name || shortId(a.agentId);
+      const why = a.failure ? `${a.failure.code}: ${a.failure.message}` : 'no failure evidence recorded';
+      console.log(`  ${chalk.red(h)}  ${why}`);
     }
   }
   if (stillPending.length > 0) {

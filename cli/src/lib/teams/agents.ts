@@ -3172,16 +3172,6 @@ export class AgentManager {
     return false;
   }
 
-  private async cleanupPartialAgent(agent: AgentProcess): Promise<void> {
-    this.agents.delete(agent.agentId);
-    try {
-      const agentDir = await agent.getAgentDir();
-      await fs.rm(agentDir, { recursive: true });
-    } catch (err) {
-      console.warn(`Failed to clean up agent directory:`, err);
-    }
-  }
-
   private async cleanupOldAgents(): Promise<void> {
     // listCompleted() is terminal-only (isTerminalStatus), so a pending or
     // running teammate is never a reap candidate — retention can only delete a

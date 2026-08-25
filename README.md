@@ -744,7 +744,10 @@ Team state is observable via `agents teams list --json` / `agents teams status -
 Placement, spawn, dependency, and non-zero-exit failures are persisted as sanitized
 evidence on the teammate record and shown by `teams status`. A failed root does not stop
 independent DAG branches; descendants name the failed or missing `--after` dependency
-that blocked them instead of remaining pending indefinitely.
+that blocked them instead of remaining pending indefinitely. `teams start` reports
+teammates that failed during the wave (`Failed this wave` / JSON `failed[]`) and exits
+non-zero when a wave produced only failures. A failed teammate keeps its record as
+evidence, so re-adding the same name needs `teams remove <team> <name>` first.
 
 ---
 
