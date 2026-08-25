@@ -46,6 +46,14 @@ for marker in 'SES-' 'SEC-' 'EXEC-' 'Given/When/Then' '[Intended]' '[Drift]'; do
   fi
 done
 
+for doc in architecture concepts resources execution sessions fleet orchestration automation secrets; do
+  if grep -qF '```mermaid' "docs/$doc.md"; then
+    log "✓ docs/$doc.md contains a component figure"
+  else
+    fail "docs/$doc.md should contain a Mermaid component or data-flow figure"
+  fi
+done
+
 # These entry points are outside docs/, but their specification anchors are part of
 # the contributor contract.
 for anchor in coverage-inventory sessions secrets agent-execution scheduling--execution-singularity routine-execution--readiness watchdog; do

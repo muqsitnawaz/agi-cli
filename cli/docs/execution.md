@@ -1,26 +1,77 @@
-# Agent execution
+# Agent runs and execution
 
-All launches converge on `buildExecEnv` and `execAgent` / `runWithFallback`. The engine
-resolves harness and version, account, model/mode, project context, resources, actor and
-session lineage, then replaces the launcher with the harness process where possible.
+A run is an invocation of an agent harness with resolved identity, configuration, and
+execution context. Local commands, remote dispatch, team members, routines, and recovery
+all converge on one execution engine. The callers decide intent; the engine owns the
+meaning of launching an agent.
 
-Local runs, device dispatch, teams, and routines must preserve the fields their target
-needs. A value intended to reach the harness cannot disappear at the SSH boundary.
+```mermaid
+flowchart TB
+  I[Run intent] --> N[Normalize harness and version]
+  N --> C[Resolve account, model, project, resources]
+  C --> E[Build execution environment]
+  E --> P{Placement}
+  P -->|local| L[Spawn harness]
+  P -->|device| S[SSH transport]
+  S --> L
+  L --> T[Harness-native transcript]
+  L --> R[Execution record]
+  T -. correlation .-> R
+```
 
-## Recovery
+## Run identity and context
 
-Native resume is valid only when the healthy origin version still owns the transcript.
-Otherwise recovery launches a healthy version of the same harness and continues from the
-indexed conversation. Recovery never silently changes harnesses.
+The harness and version identify the executable contract. An isolated version home
+prevents configuration from bleeding between pinnable releases. Account, model, mode,
+project, resource snapshot, actor, and parent-session lineage are resolved before spawn.
+The launch identifier correlates hooks and remote boundaries even when the harness does
+not reveal its eventual conversation identifier at process start.
 
-## Interactive durability
+Environment assembly has a defined precedence and allowlist. Data intended for the
+harness must survive every boundary it crosses: local spawn, SSH dispatch, teams,
+routines, and recovery. A remote path that drops actor, credential, or lineage fields is
+not a reduced mode; it is an incomplete execution path.
 
-Local interactive launches may run bare. A remotely interactive launch must survive link
-loss and therefore requires its durable terminal transport unless the caller explicitly
-opts out. An unavailable durability prerequisite fails before the harness starts.
+## Placement is transport, not a second engine
 
-## Failure contract
+Placement chooses the machine after intent is normalized. Remote dispatch serializes the
+same command and environment contract, maps the working directory, and starts the same
+engine on the target. Interactive remote work uses a reconnectable terminal transport so
+link loss does not kill the harness. If that durability prerequisite is unavailable, the
+launch fails before doing work.
 
-Missing binaries, unsupported modes, unavailable accounts, unsafe remote context, and
-unforwardable options fail with a task-level explanation. No boundary returns success
-after silently omitting required behavior.
+```mermaid
+sequenceDiagram
+  participant Caller
+  participant Origin as Origin CLI
+  participant Target as Target CLI
+  participant Harness
+  Caller->>Origin: normalized run intent
+  Origin->>Target: SSH + explicit environment + cwd mapping
+  Target->>Harness: spawn through execution engine
+  Harness-->>Target: output and transcript identity
+  Target-->>Origin: streamed events and terminal result
+```
+
+## Runs and sessions are different records
+
+An execution record answers whether an attempted unit of work ran, failed, timed out,
+was skipped, or was blocked before a harness started. A session answers what happened in
+a conversation. A successful run commonly links to a session, but a failed prerequisite,
+command-only task, or missed routine may have no session at all. Neither record should be
+fabricated to stand in for the other.
+
+## Recovery and fallback
+
+Native resume is valid only when the transcript belongs to a healthy compatible harness
+version. When that version is unavailable, recovery starts a healthy version of the same
+harness and reconstructs context from the indexed conversation. Recovery does not
+silently switch harness families. Account fallback is bounded by the requested policy
+and records which attempt actually ran.
+
+## Failure boundaries
+
+Missing binaries, unsupported capabilities, unavailable accounts, unsafe remote
+context, stale repositories, and unforwardable options fail with a task-level reason.
+No boundary reports success after dropping required behavior. Retry applies only where
+the failure class is explicitly safe to repeat.

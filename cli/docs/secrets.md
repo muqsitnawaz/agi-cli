@@ -3,6 +3,16 @@
 Secret values are never DotAgents resources. Portable repositories contain names and
 policy only; values live in a platform-backed store or encrypted headless store.
 
+```mermaid
+flowchart LR
+  META[Portable bundle names and policy] --> R[Run resolution]
+  STORE[(Platform or encrypted store)] --> B[Secrets broker]
+  R --> B
+  B --> ENV[Child-only environment]
+  ENV --> H[Harness process]
+  B --> AUDIT[Value-free audit metadata]
+```
+
 ## Two boundaries
 
 Storage protection answers where plaintext rests. Materialization protection answers
