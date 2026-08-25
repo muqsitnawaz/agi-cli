@@ -3000,7 +3000,7 @@ nothing but its own view cache.
   the catch-up path: `claimMissedFire` (`lib/catchup.ts`) creates the run directory
   with a non-recursive `mkdir` — an atomic test-and-set — so the losing caller reports
   `already claimed by the scheduler` and never spawns a second agent
-  (`docs/routines.md` §Catching up a missed fire). Status: **Current** for the
+  (see [`automation.md`](automation.md)). Status: **Current** for the
   catch-up/overlap path (the `missed`-record claim), **[Intended]** for the primary
   scheduled dispatch path (see SING-GAP-3): today the forward-timer dispatch has no
   durable per-slot claim of its own, so two live schedulers evaluating one occurrence
@@ -3351,8 +3351,8 @@ readiness/context fields RT-1..RT-8 describe.
 - **RT-1 (MUST).** `projects` (plural) is **grouping metadata only**: it organises a
   routine under a project group in `agents routines list` and the menu bar and MUST
   NOT affect scheduling or execution — the special value `["*"]` means "all defined
-  projects" (`lib/routines.ts` `normalizeProjects`; `docs/routines.md` §Project
-  tagging, "Tagging is **metadata-only**"). `projects[]` MUST NOT be silently promoted
+  projects" (`lib/routines.ts` `normalizeProjects`; see
+  [`automation.md`](automation.md)). `projects[]` MUST NOT be silently promoted
   into an execution context. Status: **Current**.
 - **RT-2 (MUST, [Intended]).** A routine's **execution anchor** is a distinct singular
   concept — a `project` field (one named `agents projects` entry) resolved to a base
@@ -3427,7 +3427,7 @@ readiness/context fields RT-1..RT-8 describe.
   untrusted sandbox, dead account, dispatch failure) still owns a terminal run that is
   visible in `agents routines runs`, even though it has no session. Status: **Current**
   for run-first history (`missed`/`failed` runs exist with no session,
-  `docs/routines.md` §Run State Machine); **[Intended]** for the pre-session
+  see [`automation.md`](automation.md)); **[Intended]** for the pre-session
   readiness-failure runs (RT-5) and the menu History surface that renders them.
 - **RT-7 (MUST, [Intended]).** `RunMeta.status` MUST distinguish, at minimum:
   `running`, `completed`, `failed` (the body ran and errored), `timeout`, `missed`
