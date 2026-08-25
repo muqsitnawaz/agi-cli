@@ -14,33 +14,29 @@ fail() {
   ERRORS=$((ERRORS + 1))
 }
 
-# --- 1. AGENT-CHEATSHEET exists and covers the basics ---
-CHEATSHEET="docs/AGENT-CHEATSHEET.md"
-if [[ ! -f "$CHEATSHEET" ]]; then
-  fail "$CHEATSHEET is missing"
+# --- 1. The compact architectural spine exists and is the documented entry point ---
+for doc in README architecture concepts resources execution sessions fleet orchestration automation interfaces secrets observability distribution specifications; do
+  if [[ -f "docs/$doc.md" ]]; then
+    log "✓ docs/$doc.md exists"
+  else
+    fail "docs/$doc.md is missing"
+  fi
+done
+
+if grep -qF "docs/README.md" AGENTS.md; then
+  log "✓ AGENTS.md links to the architecture index"
 else
-  log "✓ $CHEATSHEET exists"
-  for section in "The three DotAgents repos" "\`AGENTS.md\` is the canonical memory file" "Capability table gates" "Version homes" "Two unrelated things are called"; do
-    if grep -qF "$section" "$CHEATSHEET"; then
-      log "  ✓ covers: $section"
-    else
-      fail "$CHEATSHEET missing section: $section"
-    fi
-  done
+  fail "AGENTS.md should link to docs/README.md"
 fi
 
-# --- 2. Entry points reference the cheat sheet ---
-if grep -qF "AGENT-CHEATSHEET.md" AGENTS.md; then
-  log "✓ AGENTS.md links to AGENT-CHEATSHEET.md"
-else
-  fail "AGENTS.md should link to AGENT-CHEATSHEET.md"
-fi
-
-if grep -qF "AGENT-CHEATSHEET.md" docs/README.md; then
-  log "✓ docs/README.md links to AGENT-CHEATSHEET.md"
-else
-  fail "docs/README.md should link to AGENT-CHEATSHEET.md"
-fi
+# --- 2. Authored architecture does not grow command-manual sections ---
+FORBIDDEN_HEADING_RE='^#{2,3} (Setup|Command [Rr]eference|Recipes|File [Mm]ap|Source [Mm]ap|Key Functions|Roadmap)$'
+while IFS= read -r file; do
+  [[ "$file" == "docs/command-index.md" ]] && continue
+  if grep -Eq "$FORBIDDEN_HEADING_RE" "$file"; then
+    fail "$file contains a user/reference heading reserved outside architecture docs"
+  fi
+done < <(find docs -name '*.md')
 
 # --- 3. No broken relative markdown links in docs/*.md ---
 while IFS= read -r file; do
