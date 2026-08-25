@@ -184,7 +184,7 @@ because it covers the three cases the in-process loop structurally cannot.
 
 ```bash
 agents run <agent> --interactive --device <host>   # unchanged
-agents sessions                                     # gains: detached rows ranked first
+agents sessions                                     # gains a `detached` label. Order unchanged.
 agents sessions resume <id>                         # says whether it attached or replayed
 ```
 
@@ -203,16 +203,14 @@ observed on yosemite-m1 after killing the client:
   </div>
   <div class="artifact-behavior-panel" data-state="proposed" data-evidence="mockup">
     <strong>Proposed — the daemon covers what the loop cannot</strong>
-<pre><code>link drops  →  in-process loop  →  attach live pane      (fast path, unchanged)
+<pre><code>$ agents sessions
+  claude  yosemite-s0  2m ago   running            Reconnect r…
+  grok    yosemite-s0  4m ago   detached           Market
+  codex   yosemite-m4  11m ago  running            Dispatch
+  claude  zion         1h ago   idle               Prix Cloud
 
-tab closed  ┐
-crash       ├→  daemon notices no client  →  marks detached  →  offers resume
-reboot      ┘   (boot sweep finds survivors on peers)
-
-$ agents sessions
-  NEEDS YOU
-  ⚠ detached  grok · yosemite-s0 · working, no client since 00:14
-      agents sessions resume dcf80180</code></pre>
+  default order: last activity, newest first, merged across devices
+  `detached` is a label, not a sort key</code></pre>
   </div>
 </div>
 

@@ -248,7 +248,7 @@ Sketch, deliberately not written as code yet because it needs the design decided
   notice a session that is *alive on a peer* with *no attached client*, and record it as
   a distinct state (`detached`, separate from `idle` and `stalled`).
 - That state is what the Fleet panel renders (RUSH-3175), and what `agents sessions`
-  surfaces first — the repo already says not-progressing work ranks above running work.
+  labelled clearly. Ordering is not part of this change.
 - Re-attach stays **user-initiated**. The daemon should not silently reopen tabs; that
   is the 2026-08-03 double-fire incident in a new costume. It surfaces the state and
   offers the verb.
@@ -272,7 +272,7 @@ agents run <agent> --interactive --device <host>
 #   still fragile if launched with --raw / --no-tmux        (open, P3)
 #   still fragile if run LOCALLY with tmux.enabled off      (gap, P3)
 
-agents sessions            # after P2: a detached session ranks above healthy running ones
+agents sessions            # after P2: a detached session carries a `detached` label
 ```
 
 <div class="artifact-behavior">
@@ -290,12 +290,13 @@ $ agents sessions
   <div class="artifact-behavior-panel" data-state="proposed" data-evidence="mockup">
     <strong>Proposed — the daemon owns the orphan (P2)</strong>
     <pre><code>$ agents sessions
-  NEEDS YOU
-  ● detached   grok · yosemite-s0 · 4m ago
-      alive in pane ag-grok-dcf80180, no client attached
-      agents sessions resume dcf80180
+  claude  yosemite-s0  2m ago   running            Reconnect r…
+  grok    yosemite-s0  4m ago   detached           Market
+  codex   yosemite-m4  11m ago  running            Dispatch
+  claude  zion         1h ago   idle               Prix Cloud
 
-  running (6)  ▸</code></pre>
+  default order: last activity, newest first, merged across devices
+  `detached` is a label, not a sort key</code></pre>
     <p>The daemon notices a session alive on a peer with no attached client and records
     it as <code>detached</code>. Re-attach stays user-initiated — the daemon surfaces
     the state and offers the verb, it never reopens a tab on its own.</p>
@@ -309,7 +310,7 @@ $ agents sessions
 | Real link drop in a VS Codium tab, new build both ends | Countdown renders; re-attach joins a live pane, same session id |
 | Same, with Grok | Identical — proves F2 outside unit tests |
 | Close the VS Codium tab mid-run, then look at Fleet | Session shows as `detached`, not gone (needs P2) |
-| `agents sessions` after a tab close | The orphaned session ranks above healthy running ones |
+| `agents sessions` after a tab close | The orphaned session is labelled, not reordered |
 | Local agent, `tmux.enabled` off, quit VS Codium | Currently: agent dies. After P3 (if chosen): survives |
 
 ## Risks

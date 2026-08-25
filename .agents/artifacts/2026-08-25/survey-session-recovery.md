@@ -196,7 +196,7 @@ Not the mechanisms. Each works. Three things are missing between them:
   it one more state: a session **alive on a peer with no client attached**. On boot it
   should find these — that is exactly the post-reboot case, and it is the one where attach
   still works and today does nothing.
-- Surface that state first in `agents sessions` and the Fleet panel; re-attach stays a
+- Surface that state first in `agents sessions` and the Fleet panel as a LABEL; re-attach stays a
   user action, never an automatic tab-reopen.
 - Make the attach-vs-replay outcome explicit at every call site: say *"rejoined the live
   agent"* or *"the pane was gone — replayed the transcript, the in-flight turn is lost."*

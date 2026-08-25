@@ -224,7 +224,7 @@ component that survives a reboot to run it.
 
 ```bash
 agents sessions --active     # gains: orphaned rows for RUNNING agents, and remote ones
-agents sessions              # not-progressing work ranks above healthy running work
+agents sessions              # not-progressing work is labelled clearly
 ```
 
 <div class="artifact-behavior">
@@ -241,15 +241,14 @@ agents sessions              # not-progressing work ranks above healthy running 
   </div>
   <div class="artifact-behavior-panel" data-state="proposed" data-evidence="mockup">
     <strong>Proposed — the owning device answers, and running can be orphaned</strong>
-<pre><code>$ agents sessions --active
-  NEEDS YOU
-  ⚠ orphaned   grok   · yosemite-s0 · 9m     Market
-      working, no client attached since 00:14
-      agents sessions resume dcf80180
-  ⚠ orphaned   claude · yosemite-s0 · 12m    Reconnect r…
-      waiting on a question nobody can see
+<pre><code>$ agents sessions
+  claude  yosemite-s0  2m ago   running            Reconnect r…
+  grok    yosemite-s0  4m ago   detached           Market
+  codex   yosemite-m4  11m ago  running            Dispatch
+  claude  zion         1h ago   idle               Prix Cloud
 
-  running (1)  ▸  codex · yosemite-m4</code></pre>
+  default order: last activity, newest first, merged across devices
+  `detached` is a label, not a sort key</code></pre>
     <p>Each peer classifies its own panes and reports it. A running agent with no client is
     surfaced, not hidden — it is the expensive case, still burning tokens.</p>
   </div>
