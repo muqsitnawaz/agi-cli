@@ -29,6 +29,40 @@ else
   fail "AGENTS.md should link to docs/README.md"
 fi
 
+# The normative contract is intentionally detailed. Its stable sections and evidence
+# conventions must survive documentation cleanup.
+for heading in "Coverage inventory" "Sessions" "Secrets" "Agent execution" "Scheduling & execution singularity" "Routine execution & readiness" "Watchdog"; do
+  if grep -qF "## $heading" docs/specifications.md; then
+    log "✓ specifications.md retains $heading"
+  else
+    fail "specifications.md is missing required section: $heading"
+  fi
+done
+for marker in 'SES-' 'SEC-' 'EXEC-' 'Given/When/Then' '[Intended]' '[Drift]'; do
+  if grep -qF "$marker" docs/specifications.md; then
+    log "✓ specifications.md retains $marker evidence"
+  else
+    fail "specifications.md is missing required evidence marker: $marker"
+  fi
+done
+
+# These entry points are outside docs/, but their specification anchors are part of
+# the contributor contract.
+for anchor in coverage-inventory sessions secrets agent-execution scheduling--execution-singularity routine-execution--readiness watchdog; do
+  case "$anchor" in
+    coverage-inventory) heading='Coverage inventory' ;;
+    sessions) heading='Sessions' ;;
+    secrets) heading='Secrets' ;;
+    agent-execution) heading='Agent execution' ;;
+    scheduling--execution-singularity) heading='Scheduling & execution singularity' ;;
+    routine-execution--readiness) heading='Routine execution & readiness' ;;
+    watchdog) heading='Watchdog' ;;
+  esac
+  if ! grep -qF "## $heading" docs/specifications.md; then
+    fail "broken specifications anchor referenced by repo entry points: #$anchor"
+  fi
+done
+
 # --- 2. Authored architecture does not grow command-manual sections ---
 FORBIDDEN_HEADING_RE='^#{2,3} (Setup|Command [Rr]eference|Recipes|File [Mm]ap|Source [Mm]ap|Key Functions|Roadmap)$'
 while IFS= read -r file; do
