@@ -117,9 +117,21 @@ export class NoViableDeviceError extends Error {
   }
 }
 
+/**
+ * Whether a failed placement can become viable without changing the team.
+ * Capacity and load are time-varying; a pool with at least one such exclusion
+ * must remain schedulable so a later supervisor wave can retry it. A pool that
+ * is only missing the requested harness is a durable configuration failure.
+ */
+export function isTransientPlacementBlock(error: unknown): error is NoViableDeviceError {
+  return error instanceof NoViableDeviceError
+    && error.excluded.some((entry) => entry.reason === 'capped' || entry.reason === 'overloaded');
+}
+
 /** Build the user-facing fail-loud message from the per-device reasons. */
 export function formatNoViableMessage(excluded: ExcludedDevice[], agentLabel?: string): string {
   const anyNotInstalled = excluded.some((e) => e.reason === 'not-installed');
+  const allCapped = excluded.length > 0 && excluded.every((e) => e.reason === 'capped');
   const agent = agentLabel ?? 'the requested agent';
   const perDevice = excluded
     .map((e) => (e.detail ? `${e.device} (${e.reason} ${e.detail})` : `${e.device} (${e.reason})`))
@@ -128,14 +140,21 @@ export function formatNoViableMessage(excluded: ExcludedDevice[], agentLabel?: s
   // ticket specifies; otherwise summarize the mixed reasons.
   const head = anyNotInstalled
     ? `No device in the team pool can run ${agent}.`
+    : allCapped
+      ? `Every device in the pool is at its agents.max-concurrent cap:`
     : `No viable device in the team pool for ${agent}.`;
   const anyUnreachable = excluded.some((e) => e.reason === 'unreachable');
   const hint = anyNotInstalled
     ? " Run 'agents devices ping' to see which devices have the agent installed + signed in, or add the agent to a pool device."
     : anyUnreachable
       ? " Add a device to the pool, raise a cap, or wait for the pool to free up / come back online ('agents devices ping')."
-      : ' Add a device to the pool, raise a cap, or bring an overloaded box under load.';
-  return `${head} ${perDevice}.${hint}`;
+      : allCapped
+        ? " Raise a cap with 'agents devices config <name> agents.max-concurrent N' or add a device to the pool."
+        : ' Add a device to the pool, raise a cap, or bring an overloaded box under load.';
+  const reasons = allCapped
+    ? excluded.map((e) => `${e.device} (${e.detail})`).join(', ')
+    : perDevice;
+  return `${head} ${reasons}.${hint}`;
 }
 
 /**
@@ -213,13 +232,11 @@ export function pickLeastLoaded(
   );
   const eligible = devices.filter((d) => !capped.has(d));
   if (eligible.length === 0) {
-    const detail = devices
-      .map((d) => `${d} (${load.get(d) ?? 0}/${maxConcurrent![d]})`)
-      .join(', ');
-    throw new Error(
-      `Every device in the pool is at its agents.max-concurrent cap: ${detail}. ` +
-        `Raise a cap with 'agents devices config <name> agents.max-concurrent N' or add a device to the pool.`,
-    );
+    throw new NoViableDeviceError(devices.map((device) => ({
+      device,
+      reason: 'capped' as const,
+      detail: `${load.get(device) ?? 0}/${maxConcurrent![device]}`,
+    })));
   }
   // Iterate the pool in declared order so the first device wins ties.
   let best = eligible[0];
