@@ -205,7 +205,14 @@ const ENSURE_AGENTS_CLI = [
   // used to hide the real cause and surface only as "agents-cli is not set up"
   // deep in the run, after the box was already billed. `agents setup` is
   // non-interactive with no TTY, so no --yes is needed.
-  'if [ ! -d "$HOME/.agents/.system" ]; then',
+  //
+  // The trigger keys on `.system/.git`, the SAME predicate as the postcondition
+  // below (and as `agents setup`'s own `isGitRepo` gate) — NOT on the `.system`
+  // dir alone. An interrupted prior clone that left `.system` present but with no
+  // `.git` would otherwise skip setup here, fail the postcondition, and — on a
+  // reused box that is never auto-stopped — poison the pool entry. Keying both
+  // gates on `.git` lets setup re-run and self-heal that state.
+  'if [ ! -d "$HOME/.agents/.system/.git" ]; then',
   '  if ! agents setup 2>&1; then',
   '    echo "lease bootstrap: agents setup failed" >&2',
   '    exit 97',
@@ -480,12 +487,14 @@ export async function leaseAndRun(opts: LeaseRunOptions): Promise<LeaseRunResult
     if (!opts.keep && opts.fresh && !reused) {
       opts.onPhase?.({ kind: 'teardown' });
       toreDown = crabboxStop(box.slug, { secretsBundle: opts.secretsBundle });
-    } else if (!reused && !toreDown && bootstrapFailed(exitCode)) {
+    } else if (!reused && !toreDown && !opts.keep && bootstrapFailed(exitCode)) {
       // A box THIS run provisioned that failed bootstrap (agents-cli install /
       // setup postcondition, exit 96/97) is unusable — it will fail identically
       // on reuse. Stop it so it doesn't sit idle-billing in the warm pool. Never
       // auto-stop a reused box (`--box` or a warm-pool hit): the caller owns its
-      // lifecycle and it was working before this run.
+      // lifecycle and it was working before this run. And honor `--keep-box`
+      // (`opts.keep`) — that flag is exactly how an operator keeps a
+      // failed-bootstrap box alive to debug it.
       opts.onPhase?.({ kind: 'teardown' });
       toreDown = crabboxStop(box.slug, { secretsBundle: opts.secretsBundle });
     }

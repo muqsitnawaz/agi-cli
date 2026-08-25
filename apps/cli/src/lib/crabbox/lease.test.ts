@@ -624,6 +624,20 @@ describe.skipIf(process.platform === 'win32')('leaseAndRun warm profile-pool reu
     expect(calls).toContain('stop fresh-one');
   });
 
+  it('honors --keep-box on a freshly-warmed box that failed bootstrap (operator keeps it to debug)', async () => {
+    // Regression (PR #3018 review): the bootstrap-failure teardown must NOT
+    // override --keep-box — that flag is exactly how an operator keeps a
+    // failed-bootstrap box alive to inspect it.
+    const fake = setupPoolFake({ boxes: [], readySlugs: [], runExit: LEASE_BOOTSTRAP_SETUP_FAILED });
+    const { result, phases, calls } = await runWithPool(fake, { keep: true });
+
+    expect(result.box.slug).toBe('fresh-one');
+    expect(result.exitCode).toBe(LEASE_BOOTSTRAP_SETUP_FAILED);
+    expect(result.toreDown).toBe(false);
+    expect(phases).not.toContain('teardown');
+    expect(calls.some((l) => l.startsWith('stop'))).toBe(false);
+  });
+
   it('never stops a REUSED pool box that failed bootstrap (its lifecycle is the caller’s)', async () => {
     const fake = setupPoolFake({
       boxes: [poolBoxJson('warm-one', { profile: 'agents-cli' })],
