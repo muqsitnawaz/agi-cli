@@ -1,5 +1,97 @@
 # Changelog
 
+## 1.22.52
+
+- **`agents artifacts share --visibility me|org` — identity-gated share pages (PHNX-3260).**
+  Extends the P1 `public|unlisted` tiers (RUSH-3135) with two Phoenix-gated GET
+  visibilities. `me` is visible only to the signed-in owner (the viewer's Phoenix
+  `userId` must equal the stamped `owner`); `org` is visible to any signed-in
+  Phoenix user whose **verified email domain** matches the owner's company domain
+  (`org_domain`, stamped from the owner's verified email on PUT). A mismatch on
+  either returns **404** — the same body as a missing object — so a wrong viewer
+  cannot even learn the page exists. Both are hidden from the public gallery and
+  `share list`, like `unlisted`. Publishing `org` from a public inbox
+  (gmail/googlemail/outlook/hotmail/live/icloud/me) is refused with **400**, and
+  `me`/`org` PUT without a Phoenix identity is a loud 400 (a BYO `WRITE_TOKEN`
+  alone cannot publish them). Browser GET of an unauthenticated `me`/`org` URL
+  **302**s to `${PHOENIX_ID_BASE}/login?return=<url>` (the same Google OAuth as
+  `/device`, no new IdP); the returned one-time `phoenix_ticket` is redeemed once
+  via `POST /api/v1/auth/ticket` and exchanged for an HttpOnly, HMAC-signed
+  `__Host-phoenix_share` cookie on the share host. An existing CLI
+  `Authorization: Bearer` still works with no redirect. `me`/`org` responses send
+  `Cache-Control: private, no-store` and `X-Robots-Tag: noindex`;
+  `public`/`unlisted` GET is unchanged (anonymous 200). Because the Worker template
+  changed, **already-provisioned BYO endpoints need `agents artifacts share update`**
+  to serve the new gate. Source: `cli/src/lib/share/worker-template.ts`,
+  `cli/src/lib/share/{backend,publish}.ts`, `cli/src/commands/share.ts`.
+
+- **Harden the browser daemon against the socket-timeout wedge (PHNX-3289).** Four
+  fixes to the browser/daemon reliability surface. `agents daemon status` no longer
+  errors on macOS with `ps: etimes: keyword not found` — the process-uptime probe now
+  shells the portable `ps -o etime=` and parses it with the same helper the keychain
+  reaper uses. `waitForSocket` raises its ceiling from a flat 6s to 15s and re-probes
+  across an IPC-server restart (requiring two stable accepts), so a browser
+  start/navigate that lands in a restart window no longer intermittently throws
+  `Timeout waiting for browser daemon socket`. New `agents browser stop --daemon` stops
+  the browser daemon and clears a stale/wedged `browser.sock`, failing loud if a live
+  server still holds it, so the next `start` comes up clean. And `agents browser start
+  --device <host>` now resolves the browser/profile on the TARGET device instead of the
+  local one — a bare start from a browserless box forwards to `--device` instead of
+  failing with a misleading `No supported browser found`. Source:
+  `cli/src/commands/daemon.ts`, `cli/src/lib/browser/ipc.ts`, `cli/src/commands/browser.ts`.
+
+- **Managed share: a BYO-published page no longer locks the rightful Phoenix owner out of their own handle (PHNX-3291).** The share Worker's handle-ownership check (`assertHandleOwner`) scanned every page under a namespace and 409'd `handle taken` when any page's stamped `owner` differed from the writer's Phoenix `userId`. But a BYO `WRITE_TOKEN` publish stamps `owner = SHARE_NAMESPACE` (the namespace string, e.g. `octocat`), not a userId — so once a namespace held any BYO page, its legitimate Phoenix handle owner got a 409 on every subsequent publish, and could neither publish nor change a page's `--visibility` (which blocked the me/org tiers from PHNX-3260 for that user entirely). The `__handles/<handle>` claim object is now authoritative when it exists: the recorded userId may write and anyone else is refused, regardless of a stray page's owner stamp. The page-owner scan remains as the pre-claim fallback but ignores BYO namespace stamps (`owner === handle`), so a first Phoenix publish can still claim a handle previously used only by BYO pages. Source: `cli/src/lib/share/worker-template.ts`. Requires `agents artifacts share update` on already-provisioned endpoints (the Worker template hash changed).
+
+- **`sessions resume`/`sessions attach`/`sessions focus` no longer SSH-probe the fleet before attaching a live local tmux pane (PHNX-3292).** First unique match now wins: a selector naming a live pane on THIS box — the full `ag-<agent>-<8hex>` alias `agents tmux ls` prints, or its bare 8-hex suffix when it names exactly one live local pane — attaches with zero SSH, for bare `sessions resume <alias>` and deprecated `sessions attach <alias>` too, not just `--attach-only`. Previously `collectSessionCandidates` ran first — two fleet sweeps (transcript pool + live roster) that stall on offline devices (~2 minutes measured on yosemite-s0, two copies of `unreachable or no agents CLI — skipped`) — and bare `resume` of a live alias didn't even reach the tmux-attach path at all. A miss still races the reachable fleet in parallel: `isDefinitiveMatch`/`selectorAllowsEarlyExit` (RUSH-2203) now cover a tmux alias and an exact 8-hex short id, not just a full UUID, so the first peer to answer with that pane aborts the rest of the sweep instead of waiting out every offline box's timeout. Two LIVE panes (local or fleet-answered) sharing the same 8-hex suffix fail closed with both names printed, rather than guessing; a dead/retained pane is never attached. `--device` skips the local gate entirely and scopes the race to the named box(es). Source: `cli/src/lib/session/local-tmux-attach.ts` (new, `attachLocalLiveSelector`), `cli/src/commands/{sessions,sessions-resume,attach,focus}.ts`.
+
+- **`agents tmux attach` tears the session down when the agent exits (PHNX-3293).**
+  Attaching to a wrapped pane and exiting the agent (`/exit`, Ctrl-c) used to
+  print `[detached]` and leave the tmux session in `tmux ls` — the v6 pane-died
+  hook only `detach-client`s when a client is attached, and the attach verbs
+  never killed the `remain-on-exit` husk. `tmux attach`, `sessions focus` /
+  `resume --attach-only`, and `go`'s local-tmux attach now destroy the session
+  when every pane is dead and still keep it on Ctrl-b d. A piped (no-TTY)
+  local `agents run --interactive` no longer wraps in tmux, so session-tracker
+  tests cannot leak live "trust this folder" panes. `agents tmux kill` with no
+  name opens a picker whose preview is the pane's last screen (so a leaked
+  first-run dialog is distinguishable from real work); `tmux ls` prints that
+  snippet on each row. Source:
+  `cli/src/lib/tmux/session.ts`, `cli/src/commands/tmux.ts`,
+  `cli/src/commands/focus.ts`, `cli/src/lib/exec.ts`.
+
+- **`agents browser start` no longer silently mints a logged-out `auto-chrome` (PHNX-3296).** With no configured default and no existing launchable profile, start now errors and points at `agents setup` / `agents browser use <name>` / the `browser.device` fleet hub instead of popping a signed-out Chrome. A pre-existing `auto-chrome` or legacy `default` still resolves. `agents setup`'s browser pick replaces the misleading "auto-detect on first use" opt-out with an explicit "None — this box uses the fleet hub" choice. Source: `cli/src/lib/browser/profiles.ts`, `cli/src/commands/setup-preferences.ts`, `cli/src/commands/browser.ts`.
+
+- **`sessions detach` / `sessions stop` of a unique live local session no longer wait for fleet SSH timeouts (PHNX-3298).** A live pane already visible locally is the hit: a full UUID or a unique 8-hex prefix skips `gatherRemoteActive` entirely, so a sleeping peer cannot print `unreachable or no agents CLI` or stall SIGTERM. Two local matches fail closed without waiting for unanswered boxes. A genuine miss still races the fleet and aborts remaining SSH on the first unique reachable live row; browse / `focus` with no id stays all-settle. Source: `cli/src/commands/go.ts`, `cli/src/commands/detach.ts`, `cli/src/commands/sessions-stop.ts`.
+
+- **`agents monitors add` refuses immediately when a reachable peer already has the same watcher (PHNX-3299).** The fleet duplicate guard used to collect every peer before reporting a clash, so a single slow box forced the full 12-second timeout even when another peer had already answered with the same fingerprint. The fan-out now aborts remaining SSH captures the moment a peer reports a matching monitor, while the no-match path still waits for the whole fleet so uniqueness can be proved. Source: `cli/src/commands/monitors.ts`, `cli/src/lib/monitors/remote.ts`.
+
+- **`agents repo sync user` self-heals a non-git or partial `~/.agents` by adopting it in place — no re-clone, no data loss (PHNX-3301).** When the user-layer checkout lost (or never had) its `.git`, sync hard-failed with `Not a git repo: ~/.agents` and the only fix was a destructive re-clone that wiped runtime state (`.cache` / `.history` / `scratch` / device config). It now git-backs the existing directory in place with plumbing only (`init` / `remote` / `fetch` / `update-ref` / `read-tree` / `checkout-index` / `restore`, so it never trips the fleet git-guard): materializes only the MISSING tracked files, restores a stale-stub top-level `agents.yaml` from origin (backing up the previous copy to `.history/agents.yaml.pre-adopt.bak` first), preserves gitignored runtime state, and surfaces (never clobbers) real local edits. The remote URL is resolved from an existing `origin`, `AGENTS_USER_REPO_URL`, or a device-local record left by a prior healthy sync — never hardcoded. `agents sync status` now flags a non-git `~/.agents` as a distinct drift state instead of burying it as "N missing". Source: `cli/src/lib/git.ts`, `cli/src/commands/sync.ts`, `cli/src/commands/repo.ts`, `cli/src/lib/sync-status.ts`, `cli/src/commands/status.ts`.
+
+- **Owner notifications forward to a capable fleet peer when this box can't deliver (PHNX-3303).**
+  The owner's delivery provider for the rush-backed channels (imessage / telegram /
+  slack / discord via the `rush` CLI) is macOS-only, so `agents feed post --level
+  important` / `--blocked`, `agents notify`, and monitor `notify` actions run from a
+  headless Linux worker used to record the post but fail to reach the owner with
+  `owner failed: … rush CLI not found on PATH`. They now hand the delivery over SSH to
+  a reachable macOS peer that DOES have the provider — the same reroute
+  `agents message` already uses — instead of stranding the important post. It is
+  best-effort: it never throws or blocks the post, only the macOS-only rush family
+  triggers a forward (a Linux-capable transport like openclaw-telegram stays local),
+  and when no capable peer is reachable the existing clean local error stands. A box
+  that received a forward never forwards onward (`AGENTS_OWNER_NO_FORWARD` guard).
+  Source: `cli/src/lib/channels/owner-forward.ts`, `cli/src/lib/notify.ts`,
+  `cli/src/lib/feed-broadcast.ts`.
+
+- **`agents artifacts share <file>` now derives a stable slug automatically (PHNX-3310).**
+  The default comes from the HTML `<title>` or Markdown frontmatter `title:`, then
+  the filename, so repeat publishes of a long-running artifact update the same URL;
+  `--slug` remains an optional explicit override. Source:
+  `cli/src/lib/share/publish.ts`, `cli/src/commands/share.ts`.
+
+- **The release attestation now shards its test suite across the fleet instead of pinning one box.** `release-attestation-produce.sh` — the full-suite run that mints a release's exact-tree attestation — ran the ~13k-test suite on a single auto-picked box at `--maxWorkers=2` (~880s measured, ~14 min per attestation). It now fans the suite across the fleet via `test.sh --shard N` by default, resolving N from the eligible workers `agents devices pick` reports (capped) and falling back to a single box only when fewer than two are eligible. The suite is throughput-bound, so this is ~1/N the wall time (~269s on one box → ~31s on nine). Each shard still runs vitest at `--maxWorkers=2 --retry=2`, so the RUSH-3015 per-box flake mitigation is unchanged — sharding adds machines, not per-box concurrency. New `--test-shard <n>` / `--test-devices a,b,c` overrides mirror `test.sh`. Source: `cli/scripts/release-attestation-produce.sh`.
+
+- **Shared pages now show who shared them and — the point — a visibility cue (PHNX-3260 follow-up).** The share Worker injects a slim attribution bar at the top of every served HTML page: `Shared by <handle>`, `Made with <agent>`, the date, and a colour-coded **visibility chip** — 🔒 `Only you` (me), 🏢 `Anyone at <org>` (org), 🌐 `Public`, 🔗 `Unlisted` — so a viewer can tell at a glance who can see the page, the thing the raw served HTML never surfaced. All values come from metadata the Worker already stamps (`visibility`, `owner`/handle, `org_domain`, `agent`, `date`); no new publish-time metadata and no CLI change, so it ships with `agents artifacts share update`. Non-HTML assets (images, JSON, the OG cover) are served byte-for-byte; metadata is HTML-escaped; the rewritten body drops the now-stale R2 etag. Source: `cli/src/lib/share/worker-template.ts`.
+
 ## 1.22.51
 
 - **`publish-computer-helper-mac.sh` cuts the helper's own tag (PHNX-3228).**
