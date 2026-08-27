@@ -165,18 +165,21 @@ describe('addressabilityRecoveryHint', () => {
     expect(hint).toContain('agents sessions resume');
   });
 
-  it('uses a known fallback id in the resume command when the live row has none (PHNX-3070)', () => {
-    const s = session({ host: 'codium' }) as ActiveSession;
+  it('renders the real id from the fallback when the live session id is absent (PHNX-3070)', () => {
+    // The `focus` case: the live row has no sessionId, but the caller knows the
+    // real id (meta.id). Without the fallback the hint printed the useless
+    // `agents sessions resume <id>` placeholder.
+    const s = session({ host: 'codium', sessionId: undefined }) as ActiveSession;
     s.context = 'terminal';
-    const knownId = '019fd0c8-b3e9-77a2-a1a4-444698c4d897';
-    const hint = addressabilityRecoveryHint(s, knownId);
-    expect(hint).toContain('IDE terminal');
-    expect(hint).toContain('agents sessions resume 019fd0c8');
-    expect(hint).not.toContain('<id>');
+    const hint = addressabilityRecoveryHint(s, 'ffffffff-1111-2222-3333-444444444444');
+    expect(hint).toContain('agents sessions resume ffffffff');
+    expect(hint).not.toContain('resume <id>');
   });
 
-  it('renders the <id> placeholder only when no id is known at all', () => {
-    const s = session({ host: 'codium' }) as ActiveSession;
+  it('falls back to the <id> placeholder only when neither a live id nor a fallback exists', () => {
+    const s = session({ host: undefined, sessionId: undefined }) as ActiveSession;
+    s.context = 'headless';
+    s.tty = undefined;
     const hint = addressabilityRecoveryHint(s);
     expect(hint).toContain('agents sessions resume <id>');
   });

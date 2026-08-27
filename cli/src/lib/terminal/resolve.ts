@@ -61,15 +61,17 @@ const IDE_INJECT_VARIANTS: Record<string, { cli: string; scheme: string }> = {
  * Tells the user both how to continue THIS session and how to make FUTURE runs
  * addressable, so the failure is not silent and the fix is actionable.
  *
- * `fallbackId` is the indexed transcript id when the live row has not registered
- * a sessionId yet (IDE-terminal post-spawn). The resume command must still be
- * copy-pasteable; the IDE-specific "not registered yet" copy is preserved.
+ * Branch on the live sessionId (an IDE terminal that has not registered one
+ * yet is a distinct message), but render the resume command with `fallbackId`
+ * when the caller can supply it — e.g. `focus` has meta.id even though the
+ * live row's sessionId is falsy (PHNX-3070).
  */
 export function addressabilityRecoveryHint(session: ActiveSession, fallbackId?: string): string {
-  const sid = session.sessionId || fallbackId;
-  const shortId = sid ? sid.slice(0, 8) : '<id>';
+  const sid = session.sessionId;
+  const resumeId = sid ?? fallbackId;
+  const shortId = resumeId ? resumeId.slice(0, 8) : '<id>';
   const device = session.machine ?? machineId();
-  const resumeCmd = sid ? `agents sessions resume ${shortId}` : 'agents sessions resume <id>';
+  const resumeCmd = resumeId ? `agents sessions resume ${shortId}` : 'agents sessions resume <id>';
   const tmuxCmd = `agents config set devices.${device}.tmux on`;
   const interactive = session.context === 'terminal' || !!session.tty;
 
@@ -77,7 +79,7 @@ export function addressabilityRecoveryHint(session: ActiveSession, fallbackId?: 
     return `Ghostty has no per-split addressing. ${interactive ? `Enable tmux wrapping with \`${tmuxCmd}\` and re-launch, or ` : ''}use \`${resumeCmd}\` to continue this session.`;
   }
 
-  if (session.host && session.host in IDE_INJECT_VARIANTS && !session.sessionId) {
+  if (session.host && session.host in IDE_INJECT_VARIANTS && !sid) {
     return `This IDE terminal has not registered a session id yet. Wait a moment and retry, or use \`${resumeCmd}\` to continue.`;
   }
 
