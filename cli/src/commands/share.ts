@@ -118,6 +118,9 @@ export interface ShareListItem {
   repo: string | null;
   /** Count of retained prior versions under this slug (see `share revisions`). */
   revisionCount: number;
+  /** The visibility stamped at publish time: public | unlisted | me | org.
+   * Missing on Workers that predate this field → treated as public. */
+  visibility: ShareVisibility;
   /** Arbitrary `--meta key=value` entries attached at publish time (RUSH-2683)
    * — everything that isn't a reserved provenance/label key. `{}` when none
    * were set, or when the deployed Worker predates this field. */
@@ -131,8 +134,12 @@ export interface ShareListResult {
   objects: ShareListItem[];
 }
 
-/** DI seam for tests — override the real HTTP GET of the JSON listing route. */
-export type ListingFetchFn = (url: string) => Promise<{ status: number; contentType: string; body: string }>;
+/** DI seam for tests — override the real HTTP GET of the JSON listing route.
+ * The optional `headers` carry the owner bearer for hidden-visibility listings. */
+export type ListingFetchFn = (
+  url: string,
+  headers?: Record<string, string>,
+) => Promise<{ status: number; contentType: string; body: string }>;
 
 /** Shown whenever the deployed Worker has no `?format=json` listing route — an
  * endpoint provisioned before this feature. Points at the RUSH-2449 update path
@@ -142,8 +149,11 @@ const OUTDATED_TEMPLATE_HINT =
   'Your deployed share Worker has no machine-readable listing route — it predates `agents artifacts share list`. ' +
   'Run `agents artifacts share update` to deploy the current Worker template, then retry (`agents artifacts share status` shows whether an update is due).';
 
-async function defaultListingFetch(url: string): Promise<{ status: number; contentType: string; body: string }> {
-  const res = await fetch(url, { headers: { accept: 'application/json' } });
+async function defaultListingFetch(
+  url: string,
+  headers?: Record<string, string>,
+): Promise<{ status: number; contentType: string; body: string }> {
+  const res = await fetch(url, { headers: { accept: 'application/json', ...(headers || {}) } });
   return { status: res.status, contentType: res.headers.get('content-type') ?? '', body: await res.text() };
 }
 
@@ -189,6 +199,10 @@ export function parseShareListing(user: string, body: string): ShareListResult {
       host: item.host == null ? null : String(item.host),
       repo: item.repo == null ? null : String(item.repo),
       revisionCount: typeof item.revisionCount === 'number' ? item.revisionCount : 0,
+      visibility:
+        item.visibility === 'unlisted' || item.visibility === 'me' || item.visibility === 'org'
+          ? item.visibility
+          : 'public',
       meta: parseMetaField(item.meta),
     };
   });
@@ -224,6 +238,10 @@ export async function runShareList(
     session?: string;
     /** Only shares whose label contains this text (case-insensitive substring). */
     label?: string;
+    /** Visibility filter. `public` (default) lists only public gallery pages;
+     * `unlisted`/`me`/`org` include that owner's hidden pages; `all` includes
+     * every active page. Hidden scopes send the owner's bearer and `scope=mine`. */
+    scope?: 'public' | 'unlisted' | 'me' | 'org' | 'all';
   } = {},
 ): Promise<ShareListResult> {
   const backend = resolveShareBackend({
@@ -248,9 +266,24 @@ export async function runShareList(
   }
 
   const user = await namespaceForBackend(backend, opts.githubUser);
-  const listUrl = `${backend.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(user)}?format=json`;
+  const scope = opts.scope ?? 'public';
+  const includeHidden = scope !== 'public';
+  const query = new URLSearchParams({ format: 'json' });
+  if (includeHidden) query.set('scope', 'mine');
+  const listUrl = `${backend.baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(user)}?${query.toString()}`;
+
+  const listingHeaders: Record<string, string> = {};
+  if (includeHidden) {
+    if (!backend.token) {
+      throw new Error(
+        `Listing ${scope} shares requires owner authentication. Run 'agents auth login' for the managed endpoint, or ensure SHARE_WRITE_TOKEN / 'agents artifacts share join' is configured for BYO.`,
+      );
+    }
+    listingHeaders.authorization = `Bearer ${backend.token}`;
+  }
+
   const fetchListing = opts.fetchListing ?? defaultListingFetch;
-  const res = await fetchListing(listUrl);
+  const res = await fetchListing(listUrl, listingHeaders);
 
   if (res.status === 404) {
     // A single-segment path 404s either because the namespace is genuinely empty
@@ -280,7 +313,7 @@ export async function runShareList(
     throw new Error(OUTDATED_TEMPLATE_HINT);
   }
   const parsed = parseShareListing(user, res.body);
-  return applyShareListFilters(parsed, opts);
+  return applyShareListFilters(parsed, { agent: opts.agent, session: opts.session, label: opts.label, scope });
 }
 
 /** Client-side filtering over an already-fetched listing (RUSH-2683) — the
@@ -289,9 +322,12 @@ export async function runShareList(
  * caller actually sees. */
 function applyShareListFilters(
   result: ShareListResult,
-  filters: { agent?: string; session?: string; label?: string },
+  filters: { agent?: string; session?: string; label?: string; scope?: 'public' | 'unlisted' | 'me' | 'org' | 'all' },
 ): ShareListResult {
   let objects = result.objects;
+  if (filters.scope && filters.scope !== 'all') {
+    objects = objects.filter((o) => o.visibility === filters.scope);
+  }
   if (filters.agent) {
     const needle = filters.agent.toLowerCase();
     objects = objects.filter((o) => (o.agent ?? '').toLowerCase() === needle);
@@ -326,7 +362,9 @@ export function formatShareList(result: ShareListResult, json = false): string {
     chalk.dim(`  ${result.count} published ${result.count === 1 ? 'page' : 'pages'}`);
   const rows = result.objects.map((o) => {
     const when = o.publishedAt ? o.publishedAt.slice(0, 10) : 'unknown';
-    const bits = [when, formatBytes(o.size)];
+    const visibility = o.visibility ?? 'public';
+    const visibilityBit = visibility === 'public' ? chalk.green('public') : chalk.yellow(visibility);
+    const bits = [visibilityBit, when, formatBytes(o.size)];
     if (o.agent) bits.push(o.agent);
     if (o.revisionCount > 0) bits.push(`${o.revisionCount} ${o.revisionCount === 1 ? 'revision' : 'revisions'}`);
     if (o.expiresAt) bits.push(`expires ${o.expiresAt.slice(0, 10)}`);
@@ -855,17 +893,32 @@ ${SHARE_DELETE_NOTES}
     // share.test.ts). Matches the `revisions` precedent (--for-user/
     // --revisions-json) and the `delete`/`unshare` precedent (--for-user/
     // --delete-json) below.
+    //
+    // `--visibility` is also owned by the parent `share <file>` command (publish),
+    // so the listing filter is named `--scope` here; `--all` is the convenience
+    // alias for `--scope all`.
     .option('--for-user <user>', 'GitHub username whose namespace to list (default: resolved from gh/git config)')
+    .addOption(
+      new Option(
+        '--scope <level>',
+        'visibility filter: public (default), unlisted, me, org, or all',
+      )
+        .choices(['public', 'unlisted', 'me', 'org', 'all'])
+        .default('public'),
+    )
+    .option('--all', "list every page including hidden unlisted/me/org shares (alias for --scope all)")
     .option('--agent <name>', 'filter to shares published by this agent/harness (case-insensitive)')
     .option('--session <id>', 'filter to shares published from this session id')
     // Named --label-contains, not --label: `share <file>` (the parent) already owns
     // `--label`/`--title`, same collision class as --for-user/--list-json above.
     .option('--label-contains <substr>', 'filter to shares whose label contains this text (case-insensitive)')
-    .option('--list-json', 'emit the machine-readable listing (slug, url, size, contentType, publishedAt, expiresAt, label, agent, session, host, repo, revisionCount, meta)')
-    .action(async (opts: { forUser?: string; agent?: string; session?: string; labelContains?: string; listJson?: boolean }) => {
+    .option('--list-json', 'emit the machine-readable listing (slug, url, size, contentType, publishedAt, expiresAt, label, visibility, agent, session, host, repo, revisionCount, meta)')
+    .action(async (opts: { forUser?: string; scope?: 'public' | 'unlisted' | 'me' | 'org' | 'all'; all?: boolean; agent?: string; session?: string; labelContains?: string; listJson?: boolean }) => {
       try {
+        const scope = opts.all ? 'all' : (opts.scope ?? 'public');
         const result = await runShareList({
           githubUser: opts.forUser,
+          scope,
           agent: opts.agent,
           session: opts.session,
           label: opts.labelContains,
@@ -882,6 +935,11 @@ ${SHARE_DELETE_NOTES}
       # Everything you've published, newest first
       agents artifacts share list
 
+      # Include your hidden pages (unlisted / me / org) so you can see everything
+      agents artifacts share list --all
+      agents artifacts share list --scope me
+      agents artifacts share list --scope unlisted
+
       # Machine-readable — e.g. pull every still-public URL with jq
       agents artifacts share list --list-json | jq -r '.objects[].url'
 
@@ -894,15 +952,20 @@ ${SHARE_DELETE_NOTES}
     `,
     notes: `
   Lists the ACTIVE pages in your namespace — expired links and the sibling .png OG
-  covers are omitted (it mirrors the public gallery). Signed-in users list the
-  managed endpoint (share.agents-cli.sh/<handle>); otherwise BYO. It reads the
-  endpoint's JSON listing route, which ships with the current Worker template. If
-  a BYO Worker predates this feature the command says so and points you at 'agents
-  artifacts share update' (RUSH-2449) rather than returning a wrong or empty result
-  — see 'agents artifacts share status' for whether an update is due.
+  covers are omitted. By default this mirrors the public gallery (public pages only).
+  Use --scope unlisted|me|org or --all to include your hidden pages; those scopes
+  send the owner's bearer and a 'scope=mine' hint to the Worker's JSON listing route,
+  which returns hidden pages ONLY after verifying the caller owns the namespace.
+  Signed-in users list the managed endpoint (share.agents-cli.sh/<handle>); otherwise
+  BYO. It reads the endpoint's JSON listing route, which ships with the current
+  Worker template. If a BYO Worker predates this feature the command says so and
+  points you at 'agents artifacts share update' (RUSH-2449) rather than returning a
+  wrong or empty result — see 'agents artifacts share status' for whether an update
+  is due.
 
   --agent/--session/--label-contains filter the fetched listing client-side;
-  --list-json's count reflects the filtered set.
+  --list-json's count reflects the filtered set. Each human row shows the page's
+  visibility so public vs hidden is obvious at a glance.
     `,
   });
 

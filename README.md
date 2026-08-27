@@ -1280,7 +1280,9 @@ agents traces setup                                         # provision the priv
 agents artifacts share plan.html --slug fleet --expire 30d  # → https://<base>/fleet
 agents artifacts share plan.html --label "Q3 fleet plan" --meta kind=plan   # human title + structured metadata
 agents artifacts share plan.html --json                     # URL object for plan-render hooks
-agents artifacts share list --agent claude                  # everything published, filterable
+agents artifacts share list --agent claude                  # public gallery, filterable
+agents artifacts share list --all                           # include hidden unlisted/me/org pages
+agents artifacts share list --scope me                      # just the owner-only pages
 agents artifacts share revisions fleet                      # prior versions kept under a slug
 agents artifacts share status                               # show the endpoint
 agents artifacts unshare fleet                              # take a published link (+ its OG cover) down
@@ -1315,7 +1317,7 @@ present. `--label`/`--title` names a share (else one is derived from the HTML
 `<title>`, frontmatter, or filename, with a nudge — never a blocking prompt); `--meta
 key=value` attaches structured metadata (`kind`, `project`, `ticket`, `status`, ...).
 `agents artifacts share list --agent <name> | --session <id> | --label-contains <substr>` filters
-by any of it, so the listing is a real "what have I shared" gallery, not just slugs.
+by any of it, so the listing is a real "what have I shared" gallery, not just slugs. By default it mirrors the public gallery; `--scope unlisted|me|org` (or `--all`) includes your hidden pages and marks each row with its visibility so you can tell public from private at a glance.
 Republishing an existing slug keeps the prior version as a revision by default
 (`--no-revision` to skip); `agents artifacts share revisions <slug>` shows the retained
 history, newest first.
