@@ -97,6 +97,7 @@ describe('publishFile with injected uploader', () => {
 
     expect(result).toEqual({
       url: 'https://share.example.com/octocat/rush-1800-report',
+      slug: 'rush-1800-report',
       expiresAt: new Date('2030-01-01').toISOString(),
       coverUrl: undefined,
       label: 'Report',

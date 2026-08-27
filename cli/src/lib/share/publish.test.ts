@@ -113,6 +113,7 @@ describe('publishFile', () => {
 
     expect(result).toEqual({
       url: 'https://share.example/octocat/plan-render-output',
+      slug: 'plan-render-output',
       expiresAt: '2030-01-01T00:00:00.000Z',
       coverUrl: undefined,
       label: 'Plan',
@@ -888,25 +889,24 @@ describe('detectProject / defaultSlug', () => {
     expect(detectProject(d)).toBe(expectedProject(d));
   });
 
-  it('builds <feature>-<16hex> and drops a redundant leading plan-', () => {
-    const d = mkdtempSync(join(tmpdir(), 'projx-'));
-    const slug = defaultSlug('/somewhere/plan-fleet-cockpit.html', d);
-    // 16 hex chars = 8 random bytes = 64-bit nonce (hardened from 24-bit, RUSH-1821).
-    expect(slug).toMatch(/^fleet-cockpit-[0-9a-f]{16}$/);
-    expect(slug).not.toContain('plan-fleet-cockpit');
-    expect(slug.startsWith(expectedProject(d) + '-')).toBe(false);
+  it('prefers the HTML title over the filename', () => {
+    const body = Buffer.from('<title>Fleet Cockpit</title>');
+    expect(defaultSlug('/somewhere/plan.html', body)).toBe('fleet-cockpit');
   });
 
-  it('the random tail is a full 64-bit (16 hex char) nonce, not the old 24-bit one', () => {
-    const d = mkdtempSync(join(tmpdir(), 'projn-'));
-    const tail = defaultSlug('/x/report.html', d).split('-').pop()!;
-    expect(tail).toMatch(/^[0-9a-f]{16}$/);
-    expect(tail).toHaveLength(16);
+  it('prefers Markdown frontmatter title and falls back to the filename', () => {
+    expect(defaultSlug('/x/report.md', Buffer.from('---\ntitle: Q3 Report\n---\n'))).toBe('q3-report');
+    expect(defaultSlug('/x/fleet-report.html', Buffer.from('<h1>No title</h1>'))).toBe('fleet-report');
   });
 
-  it('two publishes of the same file get distinct (hashed) slugs', () => {
-    const d = mkdtempSync(join(tmpdir(), 'projy-'));
-    expect(defaultSlug('/x/report.html', d)).not.toBe(defaultSlug('/x/report.html', d));
+  it('is deterministic for a given title', () => {
+    const body = Buffer.from('<title>Long-running Fleet Plan</title>');
+    expect(defaultSlug('/x/first.html', body)).toBe(defaultSlug('/elsewhere/second.html', body));
+  });
+
+  it('treats slashes and dotted versions in titles as content, not filename syntax', () => {
+    expect(defaultSlug('/x/report.html', Buffer.from('<title>Revenue / Q3</title>'))).toBe('revenue-q3');
+    expect(defaultSlug('/x/report.html', Buffer.from('<title>Fleet Plan v1.2</title>'))).toBe('fleet-plan-v1-2');
   });
 });
 

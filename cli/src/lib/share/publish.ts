@@ -9,7 +9,6 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
 import { hostname as osHostname } from 'node:os';
 import { readShareConfig, type ShareConfig } from './config.js';
 import { resolveGitHubUsername } from '../git.js';
@@ -109,6 +108,8 @@ export type ShareVisibility = 'public' | 'unlisted' | 'me' | 'org';
 
 export interface PublishResult {
   url: string;
+  /** URL-safe object name, explicit (`--slug`) or deterministically derived. */
+  slug?: string;
   expiresAt?: string;
   coverUrl?: string;
   /** Server-enforced visibility stamped on the object. */
@@ -454,16 +455,19 @@ export function formatSensitiveContentError(hits: SensitiveHit[]): string {
   );
 }
 
-/** Derive a URL-safe slug from a filename (or pass one through). */
-export function slugify(name: string): string {
+/** Normalize artifact title text into a URL-safe slug. */
+function normalizeSlug(name: string): string {
   return (
-    basename(name)
-      .replace(/\.[^.]+$/, '')
-      .toLowerCase()
+    name.toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 60) || 'page'
   );
+}
+
+/** Derive a URL-safe slug from a filename, stripping its path and extension. */
+export function slugify(name: string): string {
+  return normalizeSlug(basename(name).replace(/\.[^.]+$/, ''));
 }
 
 function sanitizeSlugPart(s: string): string {
@@ -492,19 +496,13 @@ export function detectProject(dir: string = process.cwd()): string {
 }
 
 /**
- * Readable slug + view id: `<feature>-<16hex>`. A leading `plan-` on the
- * filename is dropped. The project no longer prefixes the slug — the URL
- * namespace is already the publisher's handle (`/<you>/<slug>`).
- *
- * The tail is 8 random bytes (64-bit, 16 hex chars). Reads are public — the URL is
- * the only capability — so the nonce must be genuinely infeasible to brute-force,
- * not merely unlisted; 64 bits puts a blind guess out of reach. (See docs/distribution.md
- * §Security for the threat model and `--expire` for sensitive content.)
- * `--slug` still publishes that exact slug, no view-id appended.
+ * Stable default slug for an artifact: prefer its HTML `<title>` or Markdown
+ * frontmatter `title:`, then fall back to its filename. The same artifact title
+ * always yields the same slug, so republishing without `--slug` updates the same
+ * URL. `--slug` remains an exact override.
  */
-export function defaultSlug(filePath: string, _dir?: string): string {
-  const feature = slugify(filePath).replace(/^plan-/, '') || 'page';
-  return `${feature}-${randomBytes(8).toString('hex')}`;
+export function defaultSlug(filePath: string, body?: Buffer): string {
+  return body ? normalizeSlug(deriveLabel(filePath, body)) : slugify(filePath);
 }
 
 function guessContentType(filePath: string): string {
@@ -614,7 +612,8 @@ export async function publishToEndpoint(
   opts: PublishOptions = {},
 ): Promise<PublishResult> {
   const username = await resolveShareUsername(opts);
-  const slugPart = (opts.slug ?? defaultSlug(filePath)).replace(/^\/+/, '');
+  let body: Buffer = readFileSync(filePath);
+  const slugPart = (opts.slug ?? defaultSlug(filePath, body)).replace(/^\/+/, '');
   const key = buildShareKey(username, slugPart);
   const expiresAt = resolveExpire(opts.expire);
   const visibility = resolveShareVisibility(opts);
@@ -630,7 +629,6 @@ export async function publishToEndpoint(
       return { ok: res.ok, status: res.status, url: u };
     });
 
-  let body: Buffer = readFileSync(filePath);
   let coverUrl: string | undefined;
   const isHtml = /\.html?$/i.test(filePath);
   if (isHtml) {
@@ -735,6 +733,7 @@ export async function publishToEndpoint(
   }
   return {
     url: r.url ?? pageUrl,
+    slug: key.slice(key.indexOf('/') + 1),
     expiresAt,
     coverUrl,
     label,

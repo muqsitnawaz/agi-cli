@@ -1342,6 +1342,14 @@ describe('formatSharePublishResult', () => {
     expect(text.split('\n')[0]).toContain('https://share.example/plan');
   });
 
+  it('prints the resolved slug when publish returns it', () => {
+    const text = formatSharePublishResult({
+      url: 'https://share.example/octocat/fleet-plan',
+      slug: 'fleet-plan',
+    });
+    expect(text).toContain('slug: fleet-plan');
+  });
+
   it('shows an explicit label plainly, with no derived hint', () => {
     const text = formatSharePublishResult({ url: 'https://share.example/plan', label: 'Fleet Plan', labelSource: 'explicit' });
     expect(text).toContain('Fleet Plan');
