@@ -31,8 +31,9 @@ import {
 } from './doctor-diff.js';
 import { listInstalledVersions, getGlobalDefault } from './installations/versions.js';
 import { loadManifest } from './staleness/index.js';
-import { getSystemAgentsDir } from './state.js';
-import { isGitRepo } from './git.js';
+import { getSystemAgentsDir, getUserAgentsDir } from './state.js';
+import * as fs from 'fs';
+import { isGitRepo, readOriginUrl } from './git.js';
 
 /**
  * One stable status per resource, unified across every surface.
@@ -77,8 +78,19 @@ export interface SystemRepoStatus {
   unknown: boolean;
 }
 
+export interface UserRepoStatus {
+  dir: string;
+  /**
+   * True when `~/.agents` exists but is not a git repo (or is a repo with no
+   * `origin`) — a partial install `agents repo sync user` will adopt in place
+   * (PHNX-3301). A DISTINCT drift state, not a per-agent "N missing" count.
+   */
+  notGitRepo: boolean;
+}
+
 export interface UnifiedSyncStatus {
   system: SystemRepoStatus;
+  user: UserRepoStatus;
   agents: AgentVersionStatus[];
   totals: {
     drifted: number;
@@ -155,6 +167,21 @@ export async function getSystemRepoStatus(): Promise<SystemRepoStatus> {
 }
 
 /**
+ * Detect whether `~/.agents` (the user config layer) is git-backed. A partial
+ * install — runtime state present but no `.git` (or no `origin`) — is a distinct
+ * drift state that `agents repo sync user` heals by adopting in place (PHNX-3301),
+ * surfaced separately from per-version resource gaps. Purely local; no network.
+ */
+export async function getUserRepoStatus(): Promise<UserRepoStatus> {
+  const dir = getUserAgentsDir();
+  if (!fs.existsSync(dir)) return { dir, notGitRepo: false };
+  if (!isGitRepo(dir)) return { dir, notGitRepo: true };
+  // A repo with no `origin` is just as partial for adopt's purposes — reuse the
+  // single origin-URL reader rather than a second remote check.
+  return { dir, notGitRepo: readOriginUrl(dir) === null };
+}
+
+/**
  * Compute unified sync status across the fleet. Resolves against non-project
  * layers only (`excludeProject: true`) — the GLOBAL version home is never
  * reconciled against per-cwd `<cwd>/.agents/` resources, so counting them as
@@ -191,6 +218,7 @@ export async function computeSyncStatus(
   }
 
   const system = await getSystemRepoStatus();
+  const user = await getUserRepoStatus();
 
   const agentsNeedingSync = new Set<AgentId>();
   let drifted = 0, missing = 0, orphan = 0, versionsNeedingSync = 0, versionsNeverSynced = 0;
@@ -207,6 +235,7 @@ export async function computeSyncStatus(
 
   return {
     system,
+    user,
     agents,
     totals: {
       drifted,
