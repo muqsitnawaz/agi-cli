@@ -680,7 +680,9 @@ export async function focusSelectedSession(
       return;
     }
     console.log(chalk.yellow('This live session has no session id or living attach rail to focus.'));
-    console.log(chalk.gray(addressabilityRecoveryHint(active)));
+    // Indexed transcript id is already known even when the live row has not
+    // registered a sessionId yet (IDE-terminal post-spawn).
+    console.log(chalk.gray(addressabilityRecoveryHint(active, meta.id)));
     process.exitCode = 1;
     return;
   }

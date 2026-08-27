@@ -164,5 +164,21 @@ describe('addressabilityRecoveryHint', () => {
     expect(hint).toContain('session id');
     expect(hint).toContain('agents sessions resume');
   });
+
+  it('uses a known fallback id in the resume command when the live row has none (PHNX-3070)', () => {
+    const s = session({ host: 'codium' }) as ActiveSession;
+    s.context = 'terminal';
+    const knownId = '019fd0c8-b3e9-77a2-a1a4-444698c4d897';
+    const hint = addressabilityRecoveryHint(s, knownId);
+    expect(hint).toContain('IDE terminal');
+    expect(hint).toContain('agents sessions resume 019fd0c8');
+    expect(hint).not.toContain('<id>');
+  });
+
+  it('renders the <id> placeholder only when no id is known at all', () => {
+    const s = session({ host: 'codium' }) as ActiveSession;
+    const hint = addressabilityRecoveryHint(s);
+    expect(hint).toContain('agents sessions resume <id>');
+  });
 });
 

@@ -60,9 +60,13 @@ const IDE_INJECT_VARIANTS: Record<string, { cli: string; scheme: string }> = {
  * Human-facing recovery hint for a session the resolver judged un-addressable.
  * Tells the user both how to continue THIS session and how to make FUTURE runs
  * addressable, so the failure is not silent and the fix is actionable.
+ *
+ * `fallbackId` is the indexed transcript id when the live row has not registered
+ * a sessionId yet (IDE-terminal post-spawn). The resume command must still be
+ * copy-pasteable; the IDE-specific "not registered yet" copy is preserved.
  */
-export function addressabilityRecoveryHint(session: ActiveSession): string {
-  const sid = session.sessionId;
+export function addressabilityRecoveryHint(session: ActiveSession, fallbackId?: string): string {
+  const sid = session.sessionId || fallbackId;
   const shortId = sid ? sid.slice(0, 8) : '<id>';
   const device = session.machine ?? machineId();
   const resumeCmd = sid ? `agents sessions resume ${shortId}` : 'agents sessions resume <id>';
@@ -73,7 +77,7 @@ export function addressabilityRecoveryHint(session: ActiveSession): string {
     return `Ghostty has no per-split addressing. ${interactive ? `Enable tmux wrapping with \`${tmuxCmd}\` and re-launch, or ` : ''}use \`${resumeCmd}\` to continue this session.`;
   }
 
-  if (session.host && session.host in IDE_INJECT_VARIANTS && !sid) {
+  if (session.host && session.host in IDE_INJECT_VARIANTS && !session.sessionId) {
     return `This IDE terminal has not registered a session id yet. Wait a moment and retry, or use \`${resumeCmd}\` to continue.`;
   }
 

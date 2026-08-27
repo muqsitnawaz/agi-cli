@@ -19,6 +19,7 @@ import {
   resolveTmuxAliasState,
   shouldAttachLocalTmuxAliasBeforeFleet,
   dedupeSessionsByLogicalId,
+  focusSelectedSession,
 } from './focus.js';
 import { refuseFallback } from './go.js';
 import type { ActiveSession } from '../lib/session/active.js';
@@ -112,6 +113,28 @@ describe('selectFallback — --attach-only (old `go`) vs default resume', () => 
     expect(output).toContain('no attach rail');
     expect(output).toContain('agents sessions resume');
     expect(output).toContain('tmux');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = previous;
+    log.mockRestore();
+  });
+});
+
+describe('focusSelectedSession — live row with no sessionId (PHNX-3070)', () => {
+  it('renders the recovery hint with the indexed id, not the <id> placeholder', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const previous = process.exitCode;
+    process.exitCode = undefined;
+    const meta: SessionMeta = {
+      id: '019fd0c8-b3e9-77a2-a1a4-444698c4d897',
+      shortId: '019fd0c8', agent: 'codex', version: '0.146.0', mode: 'edit',
+      machine: 'yosemite-m5', timestamp: '2026-08-10T00:00:00Z', filePath: '/s/a.jsonl',
+    };
+    // Post-spawn IDE terminal: live, not attachable, sessionId not registered yet.
+    const active = s({ host: 'codium', machine: 'yosemite-m5', status: 'running' });
+    await focusSelectedSession(meta, active, 'yosemite-m5');
+    const output = log.mock.calls.flat().join('\n');
+    expect(output).toContain('agents sessions resume 019fd0c8');
+    expect(output).not.toContain('resume <id>');
     expect(process.exitCode).toBe(1);
     process.exitCode = previous;
     log.mockRestore();
