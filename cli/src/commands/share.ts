@@ -64,6 +64,7 @@ export function formatSharePublishResult(result: PublishResult, json = false): s
   if (json) return JSON.stringify(result, null, 2);
 
   const lines = [chalk.green(result.url)];
+  if (result.slug) lines.push(chalk.dim(`  slug: ${result.slug}`));
   if (result.label) {
     const hint = result.labelSource === 'derived' ? chalk.dim(' (derived — pass --label to set one)') : '';
     lines.push(chalk.dim(`  "${result.label}"`) + hint);
@@ -601,7 +602,7 @@ export function registerShareCommands(artifactsCmd: Command): void {
     .command('share')
     .description('Publish an HTML file to a shareable link — managed if signed in, otherwise your Cloudflare R2.')
     .argument('[file]', 'file to publish (HTML or any static asset)')
-    .option('--slug <slug>', 'custom URL slug under your namespace (default: <feature>-<16hex>)')
+    .option('--slug <slug>', 'URL slug override (default: stable slug of the artifact title, then filename)')
     .option('--github-user <user>', 'GitHub username for the share namespace (default: resolved from gh/git config; ignored on the managed endpoint)')
     .option('--expire <spec>', "auto-expire (default 30d). e.g. 12h, 30d, 2026-08-01, or 'never'")
     .addOption(
@@ -684,17 +685,17 @@ export function registerShareCommands(artifactsCmd: Command): void {
       # Hide from the public gallery (direct URL still works, noindex) and expire sooner
       agents artifacts share ./out/report.html --visibility unlisted --expire 12h
 
-      # Permanent public page (opt out of the default 30d expiry)
-      agents artifacts share ./out/landing.html --slug landing --expire never
+      # Permanent public page (the slug is derived from its title)
+      agents artifacts share ./out/landing.html --expire never
 
-      # Custom slug, expiring in 7 days
+      # Optional slug override
       agents artifacts share ./out/report.html --slug q3-report --expire 7d
 
       # Human title + structured metadata, shown in the gallery and share list
       agents artifacts share ./out/plan.html --label "Q3 fleet plan" --meta kind=plan --meta ticket=RUSH-2683
 
-      # Republish without keeping the previous version as a revision
-      agents artifacts share ./out/plan.html --slug q3-report --no-revision
+      # Republish the same title to the same URL without retaining a revision
+      agents artifacts share ./out/plan.html --no-revision
 ${SHARE_DELETE_EXAMPLES}
       # One-time setup (or join an existing endpoint)
       agents artifacts setup
@@ -706,8 +707,10 @@ ${SHARE_DELETE_EXAMPLES}
     notes: `
   Signed-in users publish to the managed endpoint (share.agents-cli.sh/<handle>/…)
   with the Phoenix session — no Cloudflare account, bucket, or write token. The
-  handle is the local-part of the signed-in email; the default slug is
-  <readable>-<16hex>. Without a session, the existing BYO Cloudflare path still
+  handle is the local-part of the signed-in email. The default slug is derived
+  deterministically from the HTML <title> or Markdown frontmatter title, then
+  the filename, so republishing the same title updates the same URL. --slug is
+  an optional override. Without a session, the existing BYO Cloudflare path still
   applies (setup / join). HTML is stored as one object: local images are inlined
   and Chrome-saved file:// TOC links become in-page hashes.
 

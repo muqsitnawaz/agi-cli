@@ -18,6 +18,7 @@ import {
   RETIRED_TOP_LEVEL_COMMANDS,
 } from '../lib/startup/command-registry.js';
 import { closestTopLevelCommand, levenshtein } from '../lib/startup/spellcheck.js';
+import { getHelpSections } from '../lib/help.js';
 
 function artifactsGroup(): Command {
   const program = new Command();
@@ -58,6 +59,17 @@ describe('agents artifacts group', () => {
         '--no-revision',
         '--json',
       ]),
+    );
+  });
+
+  it('documents --slug as an optional stable title-derived override', () => {
+    const share = artifactsGroup().commands.find((c) => c.name() === 'share');
+    const slug = share?.options.find((o) => o.long === '--slug');
+    expect(slug?.description).toBe(
+      'URL slug override (default: stable slug of the artifact title, then filename)',
+    );
+    expect(getHelpSections(share!).notes).toContain(
+      'republishing the same title updates the same URL. --slug is\n  an optional override',
     );
   });
 
