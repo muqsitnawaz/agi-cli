@@ -164,5 +164,24 @@ describe('addressabilityRecoveryHint', () => {
     expect(hint).toContain('session id');
     expect(hint).toContain('agents sessions resume');
   });
+
+  it('renders the real id from the fallback when the live session id is absent (PHNX-3070)', () => {
+    // The `focus` case: the live row has no sessionId, but the caller knows the
+    // real id (meta.id). Without the fallback the hint printed the useless
+    // `agents sessions resume <id>` placeholder.
+    const s = session({ host: 'codium', sessionId: undefined }) as ActiveSession;
+    s.context = 'terminal';
+    const hint = addressabilityRecoveryHint(s, 'ffffffff-1111-2222-3333-444444444444');
+    expect(hint).toContain('agents sessions resume ffffffff');
+    expect(hint).not.toContain('resume <id>');
+  });
+
+  it('falls back to the <id> placeholder only when neither a live id nor a fallback exists', () => {
+    const s = session({ host: undefined, sessionId: undefined }) as ActiveSession;
+    s.context = 'headless';
+    s.tty = undefined;
+    const hint = addressabilityRecoveryHint(s);
+    expect(hint).toContain('agents sessions resume <id>');
+  });
 });
 

@@ -61,11 +61,17 @@ const IDE_INJECT_VARIANTS: Record<string, { cli: string; scheme: string }> = {
  * Tells the user both how to continue THIS session and how to make FUTURE runs
  * addressable, so the failure is not silent and the fix is actionable.
  */
-export function addressabilityRecoveryHint(session: ActiveSession): string {
+export function addressabilityRecoveryHint(session: ActiveSession, fallbackId?: string): string {
   const sid = session.sessionId;
-  const shortId = sid ? sid.slice(0, 8) : '<id>';
+  // Branch on the live sessionId (an IDE terminal that has not registered one
+  // yet is a distinct message), but render the resume command with the real id
+  // when the caller can supply it — e.g. `focus` has meta.id even though the
+  // live row's sessionId is falsy, so without this the hint printed a useless
+  // `agents sessions resume <id>` placeholder in exactly that case (PHNX-3070).
+  const resumeId = sid ?? fallbackId;
+  const shortId = resumeId ? resumeId.slice(0, 8) : '<id>';
   const device = session.machine ?? machineId();
-  const resumeCmd = sid ? `agents sessions resume ${shortId}` : 'agents sessions resume <id>';
+  const resumeCmd = resumeId ? `agents sessions resume ${shortId}` : 'agents sessions resume <id>';
   const tmuxCmd = `agents config set devices.${device}.tmux on`;
   const interactive = session.context === 'terminal' || !!session.tty;
 
