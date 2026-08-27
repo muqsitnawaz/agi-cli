@@ -889,24 +889,38 @@ describe('detectProject / defaultSlug', () => {
     expect(detectProject(d)).toBe(expectedProject(d));
   });
 
+  // The slug is `<readable stem>-<64-bit nonce>`. The stem is the ergonomic
+  // half; the nonce is the security half and is asserted separately below.
+  const NONCE = /-[0-9a-f]{16}$/;
+  const stemOf = (slug: string): string => slug.replace(NONCE, '');
+
   it('prefers the HTML title over the filename', () => {
     const body = Buffer.from('<title>Fleet Cockpit</title>');
-    expect(defaultSlug('/somewhere/plan.html', body)).toBe('fleet-cockpit');
+    expect(stemOf(defaultSlug('/somewhere/plan.html', body))).toBe('fleet-cockpit');
   });
 
   it('prefers Markdown frontmatter title and falls back to the filename', () => {
-    expect(defaultSlug('/x/report.md', Buffer.from('---\ntitle: Q3 Report\n---\n'))).toBe('q3-report');
-    expect(defaultSlug('/x/fleet-report.html', Buffer.from('<h1>No title</h1>'))).toBe('fleet-report');
+    expect(stemOf(defaultSlug('/x/report.md', Buffer.from('---\ntitle: Q3 Report\n---\n')))).toBe('q3-report');
+    expect(stemOf(defaultSlug('/x/fleet-report.html', Buffer.from('<h1>No title</h1>')))).toBe('fleet-report');
   });
 
-  it('is deterministic for a given title', () => {
+  // RUSH-1821: reads are public and the URL is the only capability, so the slug
+  // must NOT be reconstructable from the title. A title-only slug would make
+  // "Q3 Board Numbers" resolve to a guessable, world-readable page. Republishing
+  // to the same URL is an explicit `--slug`, never an emergent property.
+  it('appends a 64-bit nonce so a title cannot be used to guess the URL', () => {
     const body = Buffer.from('<title>Long-running Fleet Plan</title>');
-    expect(defaultSlug('/x/first.html', body)).toBe(defaultSlug('/elsewhere/second.html', body));
+    const a = defaultSlug('/x/first.html', body);
+    const b = defaultSlug('/x/first.html', body);
+    expect(a).toMatch(NONCE);
+    expect(b).toMatch(NONCE);
+    expect(a).not.toBe(b);
+    expect(stemOf(a)).toBe('long-running-fleet-plan');
   });
 
   it('treats slashes and dotted versions in titles as content, not filename syntax', () => {
-    expect(defaultSlug('/x/report.html', Buffer.from('<title>Revenue / Q3</title>'))).toBe('revenue-q3');
-    expect(defaultSlug('/x/report.html', Buffer.from('<title>Fleet Plan v1.2</title>'))).toBe('fleet-plan-v1-2');
+    expect(stemOf(defaultSlug('/x/report.html', Buffer.from('<title>Revenue / Q3</title>')))).toBe('revenue-q3');
+    expect(stemOf(defaultSlug('/x/report.html', Buffer.from('<title>Fleet Plan v1.2</title>')))).toBe('fleet-plan-v1-2');
   });
 });
 

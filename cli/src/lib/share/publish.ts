@@ -6,6 +6,7 @@
 // Slack / iMessage / Twitter / Discord. The cover is best-effort: if no headless
 // browser is available it's skipped and the plain link still publishes.
 
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -496,13 +497,29 @@ export function detectProject(dir: string = process.cwd()): string {
 }
 
 /**
- * Stable default slug for an artifact: prefer its HTML `<title>` or Markdown
- * frontmatter `title:`, then fall back to its filename. The same artifact title
- * always yields the same slug, so republishing without `--slug` updates the same
- * URL. `--slug` remains an exact override.
+ * Default slug for an artifact: a readable stem from its HTML `<title>` or
+ * Markdown frontmatter `title:` (falling back to the filename), followed by a
+ * 64-bit random nonce.
+ *
+ * The stem is the ergonomic half — callers no longer have to invent a slug.
+ * The nonce is NOT optional. Reads are public and the URL is the only
+ * capability, so the tail must be genuinely infeasible to brute-force rather
+ * than merely unlisted; 64 bits puts a blind guess out of reach (RUSH-1821,
+ * docs/distribution.md §Security). Deriving the whole slug from the title
+ * would make every published page reconstructable from its heading — a title
+ * like "Q3 Board Numbers" would resolve to a live, world-readable URL that
+ * anyone can guess.
+ *
+ * Republishing to the SAME URL is therefore an explicit act, not an emergent
+ * property of the title: pass the recorded `--slug`. An agent updating an
+ * artifact across days should persist the slug it got back (the artifacts home
+ * keeps it in `.artifact.json`) and pass it on the next publish. `--slug`
+ * publishes that exact slug with no nonce appended.
  */
 export function defaultSlug(filePath: string, body?: Buffer): string {
-  return body ? normalizeSlug(deriveLabel(filePath, body)) : slugify(filePath);
+  const stem = (body ? normalizeSlug(deriveLabel(filePath, body)) : slugify(filePath))
+    .replace(/^plan-/, '') || 'page';
+  return `${stem}-${randomBytes(8).toString('hex')}`;
 }
 
 function guessContentType(filePath: string): string {
