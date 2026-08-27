@@ -10,7 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import type { ActiveSession } from '../session/active.js';
 import type { SessionProvenance, ReplyRail, MuxLocation } from '../session/provenance.js';
-import { resolveInjectTargetForSession } from './resolve.js';
+import { resolveInjectTargetForSession, addressabilityRecoveryHint } from './resolve.js';
 
 /** Minimal ActiveSession with the fields the resolver reads. */
 function session(over: {
@@ -125,6 +125,44 @@ describe('resolveInjectTargetForSession — pty + refusals', () => {
     const r = resolveInjectTargetForSession(session({ host: 'warp' }));
     expect(r.addressable).toBe(false);
     if (!r.addressable) expect(r.reason).toContain('warp');
+  });
+
+  it('includes a recovery hint on every refusal', () => {
+    const r = resolveInjectTargetForSession(session({ host: undefined }));
+    expect(r.addressable).toBe(false);
+    if (!r.addressable) {
+      expect(r.hint).toContain('agents sessions resume');
+      expect(r.hint).toContain('tmux');
+    }
+  });
+});
+
+describe('addressabilityRecoveryHint', () => {
+  it('suggests tmux wrapping and resume for an interactive Ghostty session', () => {
+    const s = session({ host: 'ghostty', sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) as ActiveSession;
+    s.context = 'terminal';
+    const hint = addressabilityRecoveryHint(s);
+    expect(hint).toContain('Ghostty');
+    expect(hint).toContain('agents sessions resume aaaaaaaa');
+    expect(hint).toContain('tmux');
+  });
+
+  it('suggests resume only for a headless session with no rail', () => {
+    const s = session({ host: undefined, sessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) as ActiveSession;
+    s.context = 'headless';
+    s.tty = undefined;
+    const hint = addressabilityRecoveryHint(s);
+    expect(hint).toContain('agents sessions resume aaaaaaaa');
+    expect(hint).not.toContain('Enable tmux');
+  });
+
+  it('tells an IDE terminal without a session id to wait or resume', () => {
+    const s = session({ host: 'codium' }) as ActiveSession;
+    s.context = 'terminal';
+    const hint = addressabilityRecoveryHint(s);
+    expect(hint).toContain('IDE terminal');
+    expect(hint).toContain('session id');
+    expect(hint).toContain('agents sessions resume');
   });
 });
 

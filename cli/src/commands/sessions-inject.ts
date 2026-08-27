@@ -31,7 +31,7 @@ interface InjectOptions {
 
 /** Resolve a session id (short or full) to an addressable terminal target, via the
  * same resolver the watchdog uses so both agree on what is reachable. */
-async function resolveTarget(sessionId: string): Promise<{ target: InjectTarget | null; reason?: string }> {
+async function resolveTarget(sessionId: string): Promise<{ target: InjectTarget | null; reason?: string; hint?: string }> {
   const sessions = await getActiveSessions();
   const match = sessions.find(
     (s) => s.sessionId === sessionId || (s.sessionId != null && s.sessionId.startsWith(sessionId)),
@@ -40,7 +40,11 @@ async function resolveTarget(sessionId: string): Promise<{ target: InjectTarget 
   const resolution = resolveInjectTargetForSession(match);
   if (!resolution.addressable) {
     // Surface the resolver's precise reason (host/rail), not a generic "not tmux".
-    return { target: null, reason: `Session "${sessionId}": ${resolution.reason}` };
+    return {
+      target: null,
+      reason: `Session "${sessionId}": ${resolution.reason}`,
+      hint: resolution.hint,
+    };
   }
   return { target: resolution.target };
 }
@@ -56,8 +60,9 @@ async function runInject(sessionId: string, text: string, options: InjectOptions
   } else {
     const resolved = await resolveTarget(sessionId);
     if (!resolved.target) {
-      if (options.json) console.log(JSON.stringify({ ok: false, error: resolved.reason }));
-      else console.error(chalk.red(resolved.reason));
+      const message = resolved.hint ? `${resolved.reason}\n${resolved.hint}` : resolved.reason;
+      if (options.json) console.log(JSON.stringify({ ok: false, error: message }));
+      else console.error(chalk.red(message));
       process.exit(1);
     }
     target = resolved.target;

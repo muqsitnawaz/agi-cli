@@ -13,6 +13,7 @@
 import type { OpenBlock, BlockOption } from './feed/feed.js';
 import type { ActiveSession } from './session/active.js';
 import type { InjectTarget } from './terminal/index.js';
+import { addressabilityRecoveryHint } from './terminal/resolve.js';
 import { injectTargetFromReplyRail } from './session/inject.js';
 
 export type AnswerRouteKind = 'mailbox' | 'pty' | 'tmux' | 'iterm' | 'resume' | 'refuse';
@@ -178,7 +179,7 @@ export function resolveAnswerRoute(input: AnswerRouterInput): AnswerRoute {
       kind: 'refuse',
       reason:
         'Agent is parked on a question but has no addressable terminal (no tmux/iterm/pty rail). ' +
-        'Open its terminal and answer there, or run `agents sessions resume <id>` first.',
+        addressabilityRecoveryHint(session),
     };
   }
 

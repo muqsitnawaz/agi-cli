@@ -102,6 +102,20 @@ describe('selectFallback — --attach-only (old `go`) vs default resume', () => 
     process.exitCode = previous;
     log.mockRestore();
   });
+
+  it('local fallback refuses with a recovery hint', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const previous = process.exitCode;
+    process.exitCode = undefined;
+    await refuseFallback(s({ sessionId: 'dead1234', machine: os.hostname(), host: 'ghostty' }), undefined);
+    const output = log.mock.calls.flat().join('\n');
+    expect(output).toContain('no attach rail');
+    expect(output).toContain('agents sessions resume');
+    expect(output).toContain('tmux');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = previous;
+    log.mockRestore();
+  });
 });
 
 describe('metaFromActive — the resume fallback input', () => {
