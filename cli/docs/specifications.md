@@ -248,8 +248,12 @@ SSH access (§7); rendering sessions that no harness produced.
   unique-enough post-sweep, so the first reachable hit is enough. PHNX-3292 also
   added a LOCAL-only gate ahead of any fleet call: a live tmux alias, or a bare
   8-hex naming exactly one live LOCAL pane, attaches with zero SSH
-  (`lib/session/local-tmux-attach.ts`, `attachLocalLiveSelector`) before
-  `sessions resume`/`sessions attach`/`sessions focus` ever reach this
+  (`lib/session/local-tmux-attach.ts`, `attachLocalLiveSelector`). A local miss
+  then races live tmux across the fleet (`lib/session/fleet-tmux-attach.ts`,
+  `attachFleetLiveSelector`) with the same early-exit: the first unique live
+  pane attaches immediately; unanswered peers are aborted and MUST NOT print a
+  skip-list on a hit. `--device` is the only dial. Only after that miss do
+  `sessions resume`/`sessions attach`/`sessions focus` reach this index
   resolver.
 - **SES-9b (MUST).** An ID-shaped selector that misses the local transcript index
   but names a session the LOCAL live registry (`getActiveSessions`, the source

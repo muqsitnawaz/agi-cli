@@ -13,6 +13,7 @@ import { sessionRecoveryPeer } from '../lib/session/recovery.js';
 import { resolveSessionMetadataValue, resumeSessionInPlace } from './sessions.js';
 import { readDetachRecord, clearDetachRecord, isHeadlessAlive } from '../lib/session/detached.js';
 import { attachLocalLiveSelector } from '../lib/session/local-tmux-attach.js';
+import { attachFleetLiveSelector } from '../lib/session/fleet-tmux-attach.js';
 
 export function registerAttachCommand(program: Command): void {
   // Deprecated: superseded by `agents sessions resume`, which detects the state
@@ -35,6 +36,9 @@ export async function attachAction(id: string): Promise<void> {
   // a live tmux alias/short id on THIS box attaches with zero SSH, matching
   // `sessions resume`. `attach` takes no `--device`, so hosts is always empty.
   if (await attachLocalLiveSelector(id.trim(), [])) {
+    return;
+  }
+  if (await attachFleetLiveSelector(id.trim(), { hosts: [] })) {
     return;
   }
   const outcome = await resolveSessionMetadataValue(id);

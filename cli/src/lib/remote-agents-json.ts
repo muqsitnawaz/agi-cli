@@ -40,15 +40,17 @@ export interface RemoteAgentsJsonOptions<T> {
   /** Per-peer deadline. Long-running maintenance commands override 12 seconds. */
   timeoutMs?: number;
   /**
-   * Opt-in early-exit for a globally-unique lookup (a full session UUID). When a
-   * peer returns an item that satisfies {@link isDefinitive}, the fan-out
-   * resolves immediately and SIGTERMs every still-outstanding peer instead of
-   * waiting for the slowest one to hit {@link REMOTE_TIMEOUT_MS}.
+   * Opt-in early-exit for a globally-unique lookup. When a peer returns an item
+   * that satisfies {@link isDefinitive}, the fan-out resolves immediately and
+   * SIGTERMs every still-outstanding peer instead of waiting for the slowest
+   * one to hit {@link REMOTE_TIMEOUT_MS}.
    *
    * OMITTED BY DEFAULT — tool-search, program-count, and the default session
    * listing keep the all-settle behavior (ambiguity, or a label/prefix conflict,
-   * is only known once every peer has answered). Only the full-UUID resolve path
-   * opts in, since only a UUID guarantees the first hit is the only hit.
+   * is only known once every peer has answered). Callers that opt in today:
+   * full-UUID resolve, PHNX-3292's tmux-alias / exact-8-hex resolve, and the
+   * live-tmux fleet race (`attachFleetLiveSelector`). A first hit that is not
+   * globally unique MUST NOT set this.
    */
   earlyExit?: {
     isDefinitive: (item: T, machine: string) => boolean;

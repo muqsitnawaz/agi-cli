@@ -21,6 +21,7 @@ import { gatherLiveTargets, pickLiveTarget, pickLiveTargets, jumpTo, probeAttach
 import { sessionProcessIsLocal, sessionProcessHost, shortIdFromName, type ActiveSession } from '../lib/session/active.js';
 import { SESSION_AGENTS, isAgentTmuxAlias, type SessionMeta, type SessionAgentId } from '../lib/session/types.js';
 import { attachLocalLiveSelector } from '../lib/session/local-tmux-attach.js';
+import { attachFleetLiveSelector } from '../lib/session/fleet-tmux-attach.js';
 export { looksLikeTmuxAlias, resolveTmuxAliasState, shouldAttachLocalTmuxAliasBeforeFleet, type TmuxAliasState } from '../lib/session/local-tmux-attach.js';
 import {
   buildSessionRecoveryCommand,
@@ -314,6 +315,13 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
     // pane is attached by name; the pane is sufficient, no fleet SSH needed. A
     // dead/absent pane falls through to id resolution.
     if (await attachLocalLiveSelector(textSelector, hosts)) {
+      return;
+    }
+    // Local miss of an id/alias: race live tmux on the fleet with earlyExit
+    // instead of collectSessionCandidates (two all-settle SSH sweeps, skip-list
+    // on offline peers). A unique live pane attaches immediately; a miss falls
+    // through to index resolve / recovery.
+    if (await attachFleetLiveSelector(textSelector, { hosts, local })) {
       return;
     }
 

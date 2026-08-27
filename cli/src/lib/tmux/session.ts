@@ -159,6 +159,8 @@ export interface ListedSession {
   createdAtTmux: number;
   windows: number;
   attached: boolean;
+  /** False when every pane is dead (`remain-on-exit` corpse). */
+  live: boolean;
   meta?: SessionMeta;
 }
 
@@ -892,6 +894,27 @@ export async function ensureSessionHookRepaired(name: string, socket?: string): 
 }
 
 /**
+ * Session names that currently have at least one non-dead pane. `undefined`
+ * when list-panes itself failed — callers treat that as "liveness unknown"
+ * rather than "every pane is dead".
+ */
+async function liveSessionNames(socket: string, timeoutMs?: number): Promise<Set<string> | undefined> {
+  const panes = await runTmux({
+    socket,
+    args: ['list-panes', '-a', '-F', '#{session_name}|#{pane_dead}'],
+    throwOnError: false,
+    timeoutMs,
+  });
+  if (panes.code !== 0) return undefined;
+  const live = new Set<string>();
+  for (const line of panes.stdout.split('\n')) {
+    const [name, dead] = line.trim().split('|');
+    if (name && dead === '0') live.add(name);
+  }
+  return live;
+}
+
+/**
  * List live sessions on the socket. Reconciles meta JSONs against tmux's view:
  *  - tmux session with no meta → returned without `meta` (external session)
  *  - meta file with no tmux session → meta deleted (stale)
@@ -922,6 +945,8 @@ export async function listSessions(opts: { socket?: string; timeoutMs?: number }
     throw new TmuxCommandError(`tmux list-sessions failed: ${res.stderr}`, res.stderr, res.stdout, res.code);
   }
 
+  const livePanes = await liveSessionNames(socket, opts.timeoutMs);
+
   const lines = res.stdout.split('\n').map(l => l.trim()).filter(Boolean);
   const out: ListedSession[] = [];
   const liveNames = new Set<string>();
@@ -935,6 +960,7 @@ export async function listSessions(opts: { socket?: string; timeoutMs?: number }
       createdAtTmux: parseInt(createdRaw, 10) || 0,
       windows: parseInt(windowsRaw, 10) || 1,
       attached: attachedRaw === '1',
+      live: livePanes === undefined ? true : livePanes.has(name),
       meta: readSessionMeta(name) ?? undefined,
     });
   }

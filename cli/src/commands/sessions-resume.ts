@@ -45,6 +45,7 @@ import { machineId } from '../lib/session/sync/config.js';
 import { sessionOriginDevice, sessionRecoveryDestinationMatches } from '../lib/session/recovery.js';
 import { runStrictResume, wantsStrictResume, type StrictResumeOptions } from './resume.js';
 import { attachLocalLiveSelector } from '../lib/session/local-tmux-attach.js';
+import { attachFleetLiveSelector } from '../lib/session/fleet-tmux-attach.js';
 
 /** Opening more than this many live sessions at once asks for confirmation first. */
 export const CONFIRM_THRESHOLD = 5;
@@ -171,11 +172,20 @@ export async function sessionsResumeAction(
     if (!wantsStrictResume(prompt, strictOpts) && await attachLocalLiveSelector(query.trim(), hosts)) {
       return;
     }
+    // Local miss: race live tmux on the fleet (index + panes) and attach the
+    // first unique reachable pane. `--device` is the only dial; `--local`
+    // skips the race. A miss falls through to strict resume / focus.
+    if (!wantsStrictResume(prompt, strictOpts) && await attachFleetLiveSelector(query.trim(), {
+      hosts,
+      local: !!options.local && hosts.length === 0,
+    })) {
+      return;
+    }
     if (resumeUsesLifecycleDispatch(query, prompt, options)) {
       await dispatchSessionLifecycleInPlace(query.trim(), hosts, !!options.attachOnly, !!options.local);
       return;
     }
-    await runStrictResume(query.trim(), prompt, strictOpts);
+    await runStrictResume(query.trim(), prompt, { ...strictOpts, hosts: hosts.length ? hosts : undefined });
     return;
   }
 

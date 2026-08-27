@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+
+vi.mock('../lib/session/fleet-tmux-attach.js', () => ({
+  attachFleetLiveSelector: vi.fn(async () => false),
+}));
+
 import { attachAction, attachRecoveryArgs } from './attach.js';
 
 describe('attachRecoveryArgs', () => {

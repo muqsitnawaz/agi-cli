@@ -16,6 +16,8 @@ export interface StrictResumeOptions {
   quiet?: boolean;
   /** Run on THIS machine even when the session belongs to a peer (escape hatch). */
   here?: boolean;
+  /** Scope the index resolve to these devices (`sessions resume --device`). */
+  hosts?: string[];
 }
 
 /**
@@ -85,7 +87,9 @@ export async function runStrictResume(
   // Read (and clear) the routing pin before anything else, so it can never
   // reach the agent's own children.
   const pinnedHere = consumeResumePinned() || !!options.here;
-  const outcome = await resolveSessionMetadataValue(sessionId.trim());
+  const outcome = await resolveSessionMetadataValue(sessionId.trim(), {
+    hosts: options.hosts,
+  });
   if (outcome.kind === 'partial') {
     // RUSH-2492: an unreachable peer is a warning, not a hard failure. The
     // resolver already resolves an id found on the reachable fleet (SES-9a),

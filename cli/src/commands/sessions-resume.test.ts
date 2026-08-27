@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+
+const attachFleetLiveSelectorMock = vi.hoisted(() => vi.fn(async () => false));
+vi.mock('../lib/session/fleet-tmux-attach.js', () => ({
+  attachFleetLiveSelector: attachFleetLiveSelectorMock,
+}));
+
 import {
   buildSessionLifecycleArgs,
   isDirectResumeSelector,
@@ -149,6 +155,10 @@ describe('sessionsResumeAction — the PHNX-3292 local gate wiring (real tmux so
   // be one no live session will ever hold.
   const randomAlias = (): string => `ag-claude-${randomBytes(4).toString('hex')}`;
 
+  // The fleet live-tmux race is stubbed: this suite pins the local gate +
+  // --device forwarding, not a live tailnet. attachFleetLiveSelectorMock
+  // returns false so a miss still falls through to strict resume.
+
   it('a bare alias resume with no live local pane falls through to strict resume instead of hanging', async () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const priorExitCode = process.exitCode;
@@ -171,14 +181,20 @@ describe('sessionsResumeAction — the PHNX-3292 local gate wiring (real tmux so
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const priorExitCode = process.exitCode;
     process.exitCode = undefined;
+    attachFleetLiveSelectorMock.mockClear();
     try {
       // shouldAttachLocalTmuxAliasBeforeFleet is false whenever hosts.length > 0
       // (rule 4: --device skips the local gate entirely) — attachLocalLiveSelector
       // never touches the local tmux socket here, and the selector still resolves
       // (as not-found) rather than hanging.
-      await sessionsResumeAction(randomAlias(), undefined, { device: 'nonexistent-device-xyz' });
+      const alias = randomAlias();
+      await sessionsResumeAction(alias, undefined, { device: 'yosemite-s0' });
       expect(errSpy.mock.calls.flat().join('\n')).toMatch(/No session matching|unreachable/);
       expect(process.exitCode).toBe(1);
+      expect(attachFleetLiveSelectorMock).toHaveBeenCalledWith(
+        alias,
+        expect.objectContaining({ hosts: ['yosemite-s0'] }),
+      );
     } finally {
       errSpy.mockRestore();
       process.exitCode = priorExitCode;

@@ -34,6 +34,7 @@ function row(over: Partial<ListedSession> = {}): ListedSession {
     createdAtTmux: 1_777_200_000,
     windows: 1,
     attached: false,
+    live: true,
     meta: {
       name: 'ag-claude-04a1307c',
       socket: '/tmp/sock',

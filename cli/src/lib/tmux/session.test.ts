@@ -201,6 +201,7 @@ describe.skipIf(skipReason)('tmux session lifecycle', () => {
     expect(list).toHaveLength(1);
     expect(list[0].name).toBe('lifecycle');
     expect(list[0].windows).toBe(1);
+    expect(list[0].live).toBe(true);
     expect(list[0].meta?.cmd).toBe('sleep 30');
   });
 
@@ -358,6 +359,14 @@ describe.skipIf(skipReason)('tmux session lifecycle', () => {
     await wait(300);
     const screen = await capturePane({ name: `splittest`, pane: paneId, socket });
     expect(screen).toContain('SECOND_PANE_MARKER');
+  });
+
+  it('listSessions marks a remain-on-exit corpse as not live', async () => {
+    await createSession({ name: 'corpse', cmd: 'true', socket });
+    await wait(400);
+    const list = await listSessions({ socket });
+    const corpse = list.find((s) => s.name === 'corpse');
+    expect(corpse?.live).toBe(false);
   });
 
   it('listSessions returns empty + cleans orphan meta files when server is gone', async () => {
