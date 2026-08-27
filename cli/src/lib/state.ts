@@ -972,6 +972,9 @@ const META_KEY_SCOPE: Record<keyof Meta, 'central' | 'device'> = {
   deviceRoutines: 'device',
   deviceConfig: 'device',
   deviceBrowser: 'device',
+  deviceFleet: 'device',
+  deviceHosts: 'device',
+  deviceAccounts: 'device',
   // Central — synced via agents.yaml.
   accounts: 'central',
   run: 'central',
@@ -1129,7 +1132,7 @@ function serializeCentral(central: Record<string, unknown>): string {
  * read-snapshot-then-separately-lock race that {@link updateMeta} would impose.
  */
 export function writeMetaUnlocked(meta: Meta): void {
-  const { agents, isolatedAgents, versions, deviceRoutines, deviceConfig, deviceBrowser, projectRoot, ...central } = meta;
+  const { agents, isolatedAgents, versions, deviceRoutines, deviceConfig, deviceBrowser, deviceFleet, deviceHosts, deviceAccounts, projectRoot, ...central } = meta;
 
   // Write the machine-local files FIRST, then strip central — so a crash mid-write
   // never removes pins/versions from central before they're persisted elsewhere.
@@ -1184,6 +1187,33 @@ export function writeMetaUnlocked(meta: Meta): void {
   const hasDeviceBrowser = !!deviceBrowser && Object.keys(deviceBrowser).length > 0;
   if (hasDeviceBrowser) doc.browser = deviceBrowser;
   else delete doc.browser;
+  // PHNX-3315 device-scoped fleet/hosts/accounts blocks. Each is this box's OWN
+  // slice; the effective fleet view is unioned across every device doc at read
+  // time (lib/devices/device-docs.ts). Empty slices are dropped so a box that
+  // has made no decision leaves no key behind (no committed empty maps).
+  const fleetDiscovery = deviceFleet?.discovery && Object.keys(deviceFleet.discovery).length > 0
+    ? deviceFleet.discovery : undefined;
+  const fleetIgnored = deviceFleet?.ignored && deviceFleet.ignored.length > 0
+    ? deviceFleet.ignored : undefined;
+  if (fleetDiscovery || fleetIgnored) {
+    const df: Record<string, unknown> = {};
+    if (fleetDiscovery) df.discovery = fleetDiscovery;
+    if (fleetIgnored) df.ignored = fleetIgnored;
+    doc.fleet = df;
+  } else delete doc.fleet;
+  const hasDeviceHosts = !!deviceHosts && Object.keys(deviceHosts).length > 0;
+  if (hasDeviceHosts) doc.hosts = deviceHosts;
+  else delete doc.hosts;
+  const accountsNative = deviceAccounts?.native && Object.keys(deviceAccounts.native).length > 0
+    ? deviceAccounts.native : undefined;
+  const accountsBindings = deviceAccounts?.bindings && Object.keys(deviceAccounts.bindings).length > 0
+    ? deviceAccounts.bindings : undefined;
+  if (accountsNative || accountsBindings) {
+    const da: Record<string, unknown> = {};
+    if (accountsNative) da.native = accountsNative;
+    if (accountsBindings) da.bindings = accountsBindings;
+    doc.accounts = da;
+  } else delete doc.accounts;
   const hasProjectRoot = typeof projectRoot === 'string' && projectRoot.length > 0;
   if (hasProjectRoot) doc.projectRoot = projectRoot;
   else delete doc.projectRoot;
@@ -1253,6 +1283,48 @@ function overlayMachineLocal(meta: Meta): Meta {
       }
       if (dm?.config && typeof dm.config === 'object' && !Array.isArray(dm.config)) {
         meta.deviceConfig = { ...meta.deviceConfig, ...(dm.config as Record<string, unknown>) };
+      }
+      // PHNX-3315: this box's own device-scoped fleet/hosts/accounts slices.
+      // These populate the `device*` keys the writers read-modify-write; the
+      // effective UNION across all boxes is computed separately by
+      // lib/devices/device-docs.ts, not here (this overlay is this box only).
+      // A malformed block on THIS box's own doc is a HARD error, exactly like
+      // `routines` below and the cross-box union readers (device-docs.ts): a
+      // silent drop would let the next writeMetaUnlocked round-trip overwrite the
+      // whole block with just the new entry, discarding the rest on this box's
+      // tracked file (PHNX-3315).
+      const isMap = (v: unknown): v is Record<string, unknown> =>
+        !!v && typeof v === 'object' && !Array.isArray(v);
+      const dmRaw = dm as { fleet?: unknown; hosts?: unknown; accounts?: unknown };
+      if (dmRaw.fleet !== undefined) {
+        if (!isMap(dmRaw.fleet)) throw new Error(`Device config corrupted at ${devicePath}: fleet must be a map.`);
+        const df = dmRaw.fleet as { discovery?: unknown; ignored?: unknown };
+        if (df.discovery !== undefined && !isMap(df.discovery)) {
+          throw new Error(`Device config corrupted at ${devicePath}: fleet.discovery must be a map.`);
+        }
+        if (df.ignored !== undefined && !Array.isArray(df.ignored)) {
+          throw new Error(`Device config corrupted at ${devicePath}: fleet.ignored must be a list.`);
+        }
+        const discovery = df.discovery as Record<string, 'approved' | 'ignored'> | undefined;
+        const ignored = df.ignored as NonNullable<Meta['deviceFleet']>['ignored'] | undefined;
+        if (discovery || ignored) meta.deviceFleet = { ...(discovery ? { discovery } : {}), ...(ignored ? { ignored } : {}) };
+      }
+      if (dmRaw.hosts !== undefined) {
+        if (!isMap(dmRaw.hosts)) throw new Error(`Device config corrupted at ${devicePath}: hosts must be a map.`);
+        meta.deviceHosts = { ...meta.deviceHosts, ...(dmRaw.hosts as Meta['hosts']) };
+      }
+      if (dmRaw.accounts !== undefined) {
+        if (!isMap(dmRaw.accounts)) throw new Error(`Device config corrupted at ${devicePath}: accounts must be a map.`);
+        const acc = dmRaw.accounts as { native?: unknown; bindings?: unknown };
+        if (acc.native !== undefined && !isMap(acc.native)) {
+          throw new Error(`Device config corrupted at ${devicePath}: accounts.native must be a map.`);
+        }
+        if (acc.bindings !== undefined && !isMap(acc.bindings)) {
+          throw new Error(`Device config corrupted at ${devicePath}: accounts.bindings must be a map.`);
+        }
+        const native = acc.native as NonNullable<Meta['deviceAccounts']>['native'] | undefined;
+        const bindings = acc.bindings as NonNullable<Meta['deviceAccounts']>['bindings'] | undefined;
+        if (native || bindings) meta.deviceAccounts = { ...(native ? { native } : {}), ...(bindings ? { bindings } : {}) };
       }
       if (Object.prototype.hasOwnProperty.call(dm, 'routines')) {
         if (!Array.isArray(dm.routines) || dm.routines.some((name) => typeof name !== 'string')) {

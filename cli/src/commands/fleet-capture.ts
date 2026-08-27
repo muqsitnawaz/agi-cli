@@ -86,6 +86,13 @@ async function runCapture(opts: CaptureOptions): Promise<void> {
     routines: listJobs().map((j) => j.name),
   };
 
+  // Discovery decisions and dismissals are device-scoped now (PHNX-3315): they
+  // live in each box's device doc and sync via the repo, so `capture` must NOT
+  // hoist the cross-box union back into the shared `agents.yaml` `fleet:` block
+  // (that would recreate the N-boxes-rewrite-one-map conflict Task A removed and
+  // re-arm the fold-then-delete migration on every capture). `meta.fleet` carries
+  // only the roster/defaults; any lingering central-legacy discovery/ignored is
+  // carried forward verbatim and drained by the migration.
   const next = captureFleet(meta.fleet, inputs);
 
   if (opts.dryRun) {
