@@ -736,7 +736,7 @@ describe('parseShareListing', () => {
     expect(result.count).toBe(2);
     expect(result.objects[0]).toEqual({
       slug: 'a', url: 'https://s/octocat/a', size: 10, contentType: 'text/html; charset=utf-8', publishedAt: '2026-08-08T00:00:00.000Z', expiresAt: null,
-      label: null, agent: null, session: null, host: null, repo: null, revisionCount: 0, meta: {},
+      label: null, visibility: 'public', agent: null, session: null, host: null, repo: null, revisionCount: 0, meta: {},
     });
     expect(result.objects[1].contentType).toBeNull();
     expect(result.objects[1].expiresAt).toBe('2099-01-01T00:00:00.000Z');
@@ -784,8 +784,8 @@ describe('formatShareList', () => {
     user: 'octocat',
     count: 2,
     objects: [
-      { slug: 'plan-a', url: 'https://s/octocat/plan-a', size: 2048, contentType: 'text/html; charset=utf-8', publishedAt: '2026-08-08T12:00:00.000Z', expiresAt: null, label: null, agent: null, session: null, host: null, repo: null, revisionCount: 0 },
-      { slug: 'report-b', url: 'https://s/octocat/report-b', size: 640, contentType: 'text/html; charset=utf-8', publishedAt: '2026-08-07T12:00:00.000Z', expiresAt: '2026-09-01T00:00:00.000Z', label: null, agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+      { slug: 'plan-a', url: 'https://s/octocat/plan-a', size: 2048, contentType: 'text/html; charset=utf-8', publishedAt: '2026-08-08T12:00:00.000Z', expiresAt: null, label: null, visibility: 'public', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+      { slug: 'report-b', url: 'https://s/octocat/report-b', size: 640, contentType: 'text/html; charset=utf-8', publishedAt: '2026-08-07T12:00:00.000Z', expiresAt: '2026-09-01T00:00:00.000Z', label: null, visibility: 'public', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
     ],
   };
 
@@ -1014,21 +1014,94 @@ describe('runShareList', () => {
     });
     expect(result.objects.map((o) => o.slug)).toEqual(['a']);
   });
+
+  it('uses a public, anonymous listing by default (no scope param, no auth header)', async () => {
+    const { share } = await freshShareModules();
+    const config = await currentConfig(share);
+    const seen: { url: string; headers?: Record<string, string> }[] = [];
+    await share.runShareList({
+      githubUser: 'octocat',
+      config,
+      fetchListing: async (url, headers) => {
+        seen.push({ url, headers });
+        return { status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'octocat', count: 0, objects: [] }) };
+      },
+    });
+    expect(seen.length).toBe(1);
+    expect(seen[0].url).toBe('https://share.test/octocat?format=json');
+    expect(seen[0].headers?.authorization).toBeUndefined();
+  });
+
+  it('sends scope=mine + owner bearer for hidden scopes', async () => {
+    const { share } = await freshShareModules();
+    const config = await currentConfig(share);
+    const seen: { url: string; headers?: Record<string, string> }[] = [];
+    const objects = [
+      { slug: 'public', url: 'https://s/octocat/public', size: 1, contentType: null, publishedAt: '2026-08-08T00:00:00.000Z', expiresAt: null, label: null, visibility: 'public', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+      { slug: 'secret', url: 'https://s/octocat/secret', size: 1, contentType: null, publishedAt: '2026-08-07T00:00:00.000Z', expiresAt: null, label: null, visibility: 'me', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+    ];
+    const result = await share.runShareList({
+      githubUser: 'octocat',
+      config,
+      writeToken: 'byo-secret',
+      scope: 'all',
+      fetchListing: async (url, headers) => {
+        seen.push({ url, headers });
+        return { status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'octocat', count: 2, objects }) };
+      },
+    });
+    expect(seen[0].url).toBe('https://share.test/octocat?format=json&scope=mine');
+    expect(seen[0].headers?.authorization).toBe('Bearer byo-secret');
+    expect(result.objects.map((o) => o.slug)).toEqual(['public', 'secret']);
+  });
+
+  it('client-side filters a scope=all response down to --scope me', async () => {
+    const { share } = await freshShareModules();
+    const config = await currentConfig(share);
+    const objects = [
+      { slug: 'public', url: 'https://s/octocat/public', size: 1, contentType: null, publishedAt: '2026-08-08T00:00:00.000Z', expiresAt: null, label: null, visibility: 'public', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+      { slug: 'secret', url: 'https://s/octocat/secret', size: 1, contentType: null, publishedAt: '2026-08-07T00:00:00.000Z', expiresAt: null, label: null, visibility: 'me', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+      { slug: 'unlisted', url: 'https://s/octocat/unlisted', size: 1, contentType: null, publishedAt: '2026-08-06T00:00:00.000Z', expiresAt: null, label: null, visibility: 'unlisted', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+    ];
+    const result = await share.runShareList({
+      githubUser: 'octocat',
+      config,
+      writeToken: 'byo-secret',
+      scope: 'me',
+      fetchListing: async () => ({ status: 200, contentType: 'application/json', body: JSON.stringify({ user: 'octocat', count: 3, objects }) }),
+    });
+    expect(result.objects.map((o) => o.slug)).toEqual(['secret']);
+    expect(result.objects[0].visibility).toBe('me');
+  });
+
+  it('fails loud before network when a hidden scope is requested with no owner token', async () => {
+    const { share } = await freshShareModules();
+    const config = await currentConfig(share);
+    await expect(
+      share.runShareList({
+        githubUser: 'octocat',
+        config,
+        // BYO config but no writeToken / session → backend.token is empty
+        scope: 'all',
+        fetchListing: async () => ({ status: 200, contentType: 'application/json', body: '{}' }),
+      }),
+    ).rejects.toThrow(/owner authentication/);
+  });
 });
 
 describe('agents artifacts share list (CLI)', () => {
-  it('registers the list command with --list-json, --for-user, --agent, --session, --label-contains', async () => {
+  it('registers the list command with --list-json, --for-user, --scope, --all, --agent, --session, --label-contains', async () => {
     const { artifacts, share } = await freshShareModules();
     const program = programWithArtifacts(artifacts);
     const listCmd = shareGroup(program)?.commands.find((c) => c.name() === 'list');
     expect(listCmd).toBeDefined();
     expect(listCmd?.options.map((o) => o.long)).toEqual(
-      expect.arrayContaining(['--list-json', '--for-user', '--agent', '--session', '--label-contains']),
+      expect.arrayContaining(['--list-json', '--for-user', '--scope', '--all', '--agent', '--session', '--label-contains']),
     );
-    // The parent `share` command owns --json/--github-user; a same-named child
+    // The parent `share` command owns --json/--github-user/--visibility; a same-named child
     // option is silently dropped at parse time (RUSH-2687), so `list` must
     // never re-declare them.
-    expect(listCmd?.options.map((o) => o.long)).not.toEqual(expect.arrayContaining(['--json', '--github-user']));
+    expect(listCmd?.options.map((o) => o.long)).not.toEqual(expect.arrayContaining(['--json', '--github-user', '--visibility']));
   });
 
   it('a real parse actually delivers --agent/--session/--label-contains/--list-json/--for-user through to runShareList (not just registration)', async () => {
@@ -1083,6 +1156,52 @@ describe('agents artifacts share list (CLI)', () => {
       expect(() => JSON.parse(out)).not.toThrow();
       const parsed = JSON.parse(out) as { objects: Array<{ label: string | null }> };
       expect(parsed.objects.map((o) => o.label)).toEqual(['Fleet Plan']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('a real parse delivers --scope (and --all as an alias) through to runShareList', async () => {
+    const { artifacts, share, config } = await freshShareModules();
+    const { renderWorkerScript } = await import('../lib/share/worker-template.js');
+    const { hashWorkerScript } = await import('../lib/share/provision.js');
+    config.writeShareConfig({
+      baseUrl: 'https://share.test', accountId: 'a', workerName: 'w', bucketName: 'b',
+      templateHash: hashWorkerScript(renderWorkerScript()),
+    });
+    installFakeGh('octocat');
+    // Hidden scopes need an owner bearer; for BYO tests it can come from env.
+    process.env.SHARE_WRITE_TOKEN = 'byo-secret';
+
+    const objects = [
+      { slug: 'secret', url: 'https://s/octocat/secret', size: 1, contentType: null, publishedAt: '2026-08-08T00:00:00.000Z', expiresAt: null, label: null, visibility: 'me', agent: null, session: null, host: null, repo: null, revisionCount: 0 },
+    ];
+    const seenUrls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => {
+      seenUrls.push(String(url));
+      return new Response(JSON.stringify({ user: 'octocat', count: 1, objects }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const program = programWithArtifacts(artifacts);
+      await program.parseAsync([
+        'node', 'agents', 'artifacts', 'share', 'list', '--scope', 'me', '--list-json',
+      ]);
+      expect(seenUrls[0]).toContain('scope=mine');
+      const out = loggedOutput();
+      const parsed = JSON.parse(out) as { objects: Array<{ slug: string; visibility: string }> };
+      expect(parsed.objects[0].visibility).toBe('me');
+
+      // --all is equivalent to --scope all
+      seenUrls.length = 0;
+      await program.parseAsync([
+        'node', 'agents', 'artifacts', 'share', 'list', '--all', '--list-json',
+      ]);
+      expect(seenUrls[0]).toContain('scope=mine');
     } finally {
       globalThis.fetch = originalFetch;
     }

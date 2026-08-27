@@ -20,6 +20,13 @@ core, browser, computer, secrets, accounts, fleet, share, watchdog, and preferen
 delegates each selected phase to its existing `agents setup <capability>` wizard.
 `agents setup status --json` is the non-interactive view of the same probes.
 
+`agents artifacts share list` mirrors the public gallery by default. Use
+`--scope unlisted|me|org` or `--all` to list the authenticated owner's hidden
+pages; the CLI forwards the owner's bearer and a `scope=mine` hint to the
+Worker's JSON listing route, which includes hidden pages only after verifying
+that the bearer owns the requested namespace. See `docs/observability.md` for
+the publication boundary.
+
 `agents feed watch --json` is the canonical thin-client operator stream: it
 composes the existing session watcher with feed attention and activity, while
 `agents sessions watch --json` remains the compatible session-only stream.

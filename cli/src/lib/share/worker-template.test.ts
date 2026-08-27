@@ -498,6 +498,93 @@ describe('worker metadata edit route (PATCH /<user>/<slug>)', () => {
   });
 });
 
+describe('owner-scoped hidden listing (GET /<user>?format=json&scope=mine)', () => {
+  async function putAsPhoenix(
+    worker: any,
+    env: any,
+    key: string,
+    body: string,
+    identity: { userId: string; email: string },
+    visibility: 'public' | 'unlisted' | 'me' | 'org',
+  ) {
+    worker.hooks.verifyPhoenixToken = async () => identity;
+    (env as { PHOENIX_ID_BASE?: string }).PHOENIX_ID_BASE = env.PHOENIX_ID_BASE || 'https://phoenix.test';
+    const res = await worker.default.fetch(
+      new Request(`https://share.test/${key}`, {
+        method: 'PUT',
+        headers: {
+          authorization: 'Bearer phoenix-token',
+          'content-type': 'text/html; charset=utf-8',
+          'x-share-visibility': visibility,
+        },
+        body,
+      }),
+      env,
+    );
+    expect(res.status, `PUT ${key} as ${identity.email} vis=${visibility}`).toBe(200);
+  }
+
+  it('includes me/org/unlisted pages for the verified owner and hides them from anonymous callers', async () => {
+    const worker = await loadWorker();
+    const { env } = makeEnv();
+    await putAsPhoenix(worker, env, 'alice/public-page', '<h1>public</h1>', { userId: 'alice', email: 'alice@example.com' }, 'public');
+    await putAsPhoenix(worker, env, 'alice/only-me', '<h1>me</h1>', { userId: 'alice', email: 'alice@example.com' }, 'me');
+    await putAsPhoenix(worker, env, 'alice/team', '<h1>org</h1>', { userId: 'alice', email: 'alice@example.com' }, 'org');
+    await putAsPhoenix(worker, env, 'alice/unlisted-page', '<h1>unlisted</h1>', { userId: 'alice', email: 'alice@example.com' }, 'unlisted');
+
+    // Anonymous listing stays public-only.
+    const anon = await worker.default.fetch(new Request('https://share.test/alice?format=json'), env);
+    expect(anon.status).toBe(200);
+    expect(anon.headers.get('cache-control')).toBe('public, max-age=30');
+    const anonPayload = await anon.json();
+    expect(anonPayload.objects.map((o: any) => o.slug)).toEqual(['public-page']);
+
+    // Owner with scope=mine sees every active page, newest first.
+    worker.hooks.verifyPhoenixToken = async () => ({ userId: 'alice', email: 'alice@example.com' });
+    const owner = await worker.default.fetch(
+      new Request('https://share.test/alice?format=json&scope=mine', {
+        headers: { authorization: 'Bearer phoenix-token' },
+      }),
+      env,
+    );
+    expect(owner.status).toBe(200);
+    expect(owner.headers.get('cache-control')).toBe('private, no-store');
+    expect(owner.headers.get('X-Robots-Tag')).toBe('noindex');
+    const ownerPayload = await owner.json();
+    const slugs = ownerPayload.objects.map((o: any) => o.slug).sort();
+    expect(slugs).toEqual(['only-me', 'public-page', 'team', 'unlisted-page']);
+    const bySlug = Object.fromEntries(ownerPayload.objects.map((o: any) => [o.slug, o]));
+    expect(bySlug['only-me'].visibility).toBe('me');
+    expect(bySlug['team'].visibility).toBe('org');
+    expect(bySlug['unlisted-page'].visibility).toBe('unlisted');
+    expect(bySlug['public-page'].visibility).toBe('public');
+  });
+
+  it('401s when scope=mine is requested without a bearer', async () => {
+    const worker = await loadWorker();
+    const { env } = makeEnv();
+    await put(worker, env, 'octocat/public-page', '<h1>public</h1>');
+    const res = await worker.default.fetch(new Request('https://share.test/octocat?format=json&scope=mine'), env);
+    expect(res.status).toBe(401);
+  });
+
+  it('403s when a different authenticated user requests scope=mine for a namespace', async () => {
+    const worker = await loadWorker();
+    const { env } = makeEnv();
+    await putAsPhoenix(worker, env, 'alice/only-me', '<h1>me</h1>', { userId: 'alice', email: 'alice@example.com' }, 'me');
+    worker.hooks.verifyPhoenixToken = async () => ({ userId: 'bob', email: 'bob@example.com' });
+    const res = await worker.default.fetch(
+      new Request('https://share.test/alice?format=json&scope=mine', {
+        headers: { authorization: 'Bearer bob-token' },
+      }),
+      env,
+    );
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe('namespace mismatch');
+  });
+});
+
 describe('revision retention (RUSH-2683 — R2 has no native object versioning)', () => {
   it('creates no revision on a FIRST publish', async () => {
     const worker = await loadWorker();

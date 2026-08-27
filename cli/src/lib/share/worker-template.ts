@@ -301,9 +301,12 @@ export default {
         const list = await env.BUCKET.list({ prefix: segments[0] + '/', limit: 1 });
         const isNamespace = list.objects && list.objects.length > 0;
         if (isNamespace) {
-          return url.searchParams.get('format') === 'json'
-            ? renderListing(env.BUCKET, url.origin, segments[0], request.method)
-            : renderGallery(env.BUCKET, url.origin, segments[0], request.method);
+          if (url.searchParams.get('format') === 'json') {
+            const scope = await resolveListingScope(request, env, segments[0]);
+            if (scope.error) return scope.error;
+            return renderListing(env.BUCKET, url.origin, segments[0], request.method, scope.includeHidden);
+          }
+          return renderGallery(env.BUCKET, url.origin, segments[0], request.method);
         }
         // Not a namespace: fall through. A legacy flat-slug object resolves to its
         // real content; anything else 404s (an empty/nonexistent namespace, which
@@ -479,7 +482,7 @@ async function renderGallery(bucket, origin, user, method) {
   return new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'public, max-age=60' } });
 }
 
-async function renderListing(bucket, origin, user, method) {
+async function renderListing(bucket, origin, user, method, includeHidden) {
   const objects = [];
   let cursor;
   do {
@@ -500,11 +503,11 @@ async function renderListing(bucket, origin, user, method) {
   const now = Date.now();
   const items = objects
     .filter(o => {
-      // Mirror the gallery: hide revisions, sibling .png OG covers, expired
-      // pages, and unlisted/me/org pages — the listing is the machine-readable public surface.
+      // Revisions and sibling .png OG covers are always hidden. Hidden-visibility
+      // pages are included ONLY when an authenticated owner requested scope=mine.
       if (isRevisionKey(o.key)) return false;
       if (o.key.endsWith('.png')) return false;
-      if (isHiddenFromGallery(o.customMetadata && o.customMetadata.visibility)) return false;
+      if (isHiddenFromGallery(o.customMetadata && o.customMetadata.visibility) && !includeHidden) return false;
       const expiresAt = o.customMetadata && o.customMetadata['expires-at'];
       return !(expiresAt && now > Date.parse(expiresAt));
     })
@@ -516,6 +519,7 @@ async function renderListing(bucket, origin, user, method) {
       publishedAt: new Date(publishedAtOf(o)).toISOString(),
       expiresAt: (o.customMetadata && o.customMetadata['expires-at']) || null,
       label: (o.customMetadata && o.customMetadata['label']) || null,
+      visibility: (o.customMetadata && o.customMetadata.visibility) || 'public',
       agent: (o.customMetadata && o.customMetadata['agent']) || null,
       session: (o.customMetadata && o.customMetadata['session']) || null,
       host: (o.customMetadata && o.customMetadata['host']) || null,
@@ -526,13 +530,33 @@ async function renderListing(bucket, origin, user, method) {
   // Newest first, so the human table and any script reads the freshest share top.
   items.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : a.publishedAt > b.publishedAt ? -1 : 0));
 
+  const cacheHeaders = includeHidden
+    ? { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'private, no-store', 'X-Robots-Tag': 'noindex' }
+    : { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=30' };
   if (method === 'HEAD') {
-    return new Response(null, { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+    return new Response(null, { status: 200, headers: cacheHeaders });
   }
   return new Response(JSON.stringify({ user, count: items.length, objects: items }), {
     status: 200,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'public, max-age=30' },
+    headers: cacheHeaders,
   });
+}
+
+// The machine-readable listing is public by default. A request with
+// '?format=json&scope=mine' asks to include the owner's hidden pages
+// (unlisted / me / org). We honor it ONLY after a valid owner bearer whose
+// namespace matches the requested handle, so one user cannot list another's
+// hidden shares. Anonymous or mismatched requests fail loud.
+async function resolveListingScope(request, env, user) {
+  const scope = new URL(request.url).searchParams.get('scope');
+  if (scope !== 'mine') return { includeHidden: false };
+  const auth = await authorizeWrite(request, env);
+  if (auth.error) return { error: auth.error };
+  const owner = auth.kind === 'phoenix' ? phoenixHandle(auth) : (env.SHARE_NAMESPACE || auth.owner);
+  if (owner !== user) {
+    return { error: json({ error: 'namespace mismatch' }, 403) };
+  }
+  return { includeHidden: true };
 }
 
 async function renderRevisions(bucket, origin, key, method, identityGated) {
