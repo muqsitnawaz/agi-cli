@@ -680,7 +680,7 @@ export async function focusSelectedSession(
       return;
     }
     console.log(chalk.yellow('This live session has no session id or living attach rail to focus.'));
-    console.log(chalk.gray(addressabilityRecoveryHint(active)));
+    console.log(chalk.gray(addressabilityRecoveryHint(active, meta.id)));
     process.exitCode = 1;
     return;
   }
