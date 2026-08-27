@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.22.53
+
+- **`agents message`/`sessions inject`/`focus` now tell you when a bare interactive session is not addressable, instead of staying silent (PHNX-3070).**
+  With `tmux.enabled` defaulting to false, bare interactive runs in Ghostty or an IDE
+  terminal with no per-split rail could not be reached by `agents message`, injection, or
+  `agents focus` — and nothing told the user. A warning at launch was wrong because IDE
+  terminals only get their session id after spawn (codex/gemini/opencode/cursor/antigravity).
+  The fix reports the failure lazily at the point of use: `resolveInjectTargetForSession`
+  returns an honest refusal with a recovery hint, and every consumer (`sessions-inject`,
+  `agents message` via `answer-router`, `go`, `focus`) surfaces that hint. The hint names
+  both `agents sessions resume <id>` to continue the current session and tmux wrapping to
+  make future runs addressable. Source: `cli/src/lib/terminal/resolve.ts`,
+  `cli/src/lib/answer-router.ts`, `cli/src/commands/sessions-inject.ts`,
+  `cli/src/commands/go.ts`, `cli/src/commands/focus.ts`.
+
 ## 1.22.52
 
 - **`agents artifacts share --visibility me|org` — identity-gated share pages (PHNX-3260).**

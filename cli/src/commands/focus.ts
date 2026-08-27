@@ -51,6 +51,7 @@ import {
   detectCurrentBackend,
   type Backend,
 } from '../lib/terminal/index.js';
+import { addressabilityRecoveryHint } from '../lib/terminal/resolve.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import { setHelpSections } from '../lib/help.js';
 
@@ -679,6 +680,7 @@ export async function focusSelectedSession(
       return;
     }
     console.log(chalk.yellow('This live session has no session id or living attach rail to focus.'));
+    console.log(chalk.gray(addressabilityRecoveryHint(active)));
     process.exitCode = 1;
     return;
   }

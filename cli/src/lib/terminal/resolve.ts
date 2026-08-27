@@ -24,13 +24,14 @@
  */
 import type { ActiveSession } from '../session/active.js';
 import { getActiveSessions } from '../session/active.js';
+import { machineId } from '../machine-id.js';
 import type { InjectTarget } from './inject.js';
 
 /** A resolved rail, or an honest refusal. The watchdog acts only on `addressable: true`. */
 export type InjectRail = 'tmux' | 'iterm' | 'vscodium' | 'ghostty' | 'pty';
 export type InjectResolution =
   | { addressable: true; rail: InjectRail; target: InjectTarget; note?: string }
-  | { addressable: false; reason: string };
+  | { addressable: false; reason: string; hint?: string };
 
 
 export interface ResolveOptions {
@@ -54,6 +55,34 @@ const IDE_INJECT_VARIANTS: Record<string, { cli: string; scheme: string }> = {
   cursor: { cli: 'cursor', scheme: 'cursor' },
   code: { cli: 'code', scheme: 'vscode' },
 };
+
+/**
+ * Human-facing recovery hint for a session the resolver judged un-addressable.
+ * Tells the user both how to continue THIS session and how to make FUTURE runs
+ * addressable, so the failure is not silent and the fix is actionable.
+ */
+export function addressabilityRecoveryHint(session: ActiveSession): string {
+  const sid = session.sessionId;
+  const shortId = sid ? sid.slice(0, 8) : '<id>';
+  const device = session.machine ?? machineId();
+  const resumeCmd = sid ? `agents sessions resume ${shortId}` : 'agents sessions resume <id>';
+  const tmuxCmd = `agents config set devices.${device}.tmux on`;
+  const interactive = session.context === 'terminal' || !!session.tty;
+
+  if (session.host === 'ghostty') {
+    return `Ghostty has no per-split addressing. ${interactive ? `Enable tmux wrapping with \`${tmuxCmd}\` and re-launch, or ` : ''}use \`${resumeCmd}\` to continue this session.`;
+  }
+
+  if (session.host && session.host in IDE_INJECT_VARIANTS && !sid) {
+    return `This IDE terminal has not registered a session id yet. Wait a moment and retry, or use \`${resumeCmd}\` to continue.`;
+  }
+
+  if (session.host) {
+    return `Host '${session.host}' has no addressable rail here. ${interactive ? `Enable tmux wrapping with \`${tmuxCmd}\` and re-launch, or ` : ''}use \`${resumeCmd}\` to continue this session.`;
+  }
+
+  return `This session has no addressable terminal rail (not tmux, iTerm, an IDE terminal, or a pty sidecar). ${interactive ? `Enable tmux wrapping with \`${tmuxCmd}\` and re-launch, or ` : ''}use \`${resumeCmd}\` to continue this session.`;
+}
 
 /**
  * Resolve a target from an already-fetched ActiveSession. Pure — no I/O — so the
@@ -91,7 +120,11 @@ export function resolveInjectTargetForSession(
   const variant = session.host ? IDE_INJECT_VARIANTS[session.host] : undefined;
   if (variant) {
     if (!session.sessionId) {
-      return { addressable: false, reason: `IDE terminal (${session.host}) has no session id to address` };
+      return {
+        addressable: false,
+        reason: `IDE terminal (${session.host}) has no session id to address`,
+        hint: addressabilityRecoveryHint(session),
+      };
     }
     return {
       addressable: true,
@@ -116,7 +149,11 @@ export function resolveInjectTargetForSession(
         note: 'coarse Ghostty window path (opt-in): raises a window and types into the FOCUSED split — not split-precise',
       };
     }
-    return { addressable: false, reason: 'un-addressable (ghostty, no tmux): no per-split addressing; watchdog skips' };
+    return {
+      addressable: false,
+      reason: 'un-addressable (ghostty, no tmux): no per-split addressing; watchdog skips',
+      hint: addressabilityRecoveryHint(session),
+    };
   }
 
   return {
@@ -124,6 +161,7 @@ export function resolveInjectTargetForSession(
     reason: session.host
       ? `no precise inject rail for host '${session.host}' (no tmux/iterm/IDE terminal detected)`
       : 'no inject rail: session is not inside tmux, iTerm, or an IDE terminal',
+    hint: addressabilityRecoveryHint(session),
   };
 }
 

@@ -47,6 +47,7 @@ import { getDefaultSocketPath } from '../lib/tmux/paths.js';
 import { sshExec, sshStream, assertValidSshTarget, shellQuote, SSH_CONN_FAILURE_CODE } from '../lib/ssh-exec.js';
 import { connectionEndedNotice } from '../lib/hosts/reconnect.js';
 import { enumerateGhosttyTabs, assignGhosttyTabs } from '../lib/session/ghostty-tabs.js';
+import { addressabilityRecoveryHint } from '../lib/terminal/resolve.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -370,7 +371,7 @@ export async function refuseFallback(s: ActiveSession, remote: string | undefine
   }
   console.log(
     chalk.yellow(`Can't jump to ${shortId(s)} — it's in ${s.host ?? 'an unknown terminal'} with no attach rail (not tmux/Ghostty).`) +
-      chalk.gray(`\nTry: agents sessions resume ${shortId(s)}`),
+      chalk.gray(`\n${addressabilityRecoveryHint(s)}`),
   );
   process.exitCode = 1;
 }

@@ -160,7 +160,7 @@ describe('resolveAnswerRoute', () => {
     expect(r.inject).toEqual({ backend: 'pty', id: 's1' });
   });
 
-  it('refuses a parked interactive agent with no rail', () => {
+  it('refuses a parked interactive agent with no rail and surfaces a recovery hint', () => {
     const r = resolveAnswerRoute({
       mailboxId: 's1',
       answer: 'Staging',
@@ -174,6 +174,8 @@ describe('resolveAnswerRoute', () => {
     });
     expect(r.kind).toBe('refuse');
     expect(r.reason).toMatch(/no addressable terminal/i);
+    expect(r.reason).toContain('agents sessions resume');
+    expect(r.reason).toContain('tmux');
   });
 });
 
