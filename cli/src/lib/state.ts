@@ -1014,6 +1014,37 @@ const KNOWN_META_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Rewrite a frozen `agents.yaml` header to the current {@link META_HEADER}.
+ *
+ * `serializeCentral` parses the existing file to preserve its hand-written body
+ * comments, but that also preserves the leading metadata header verbatim, so a
+ * top-level file written before the agi-cli rename (or before the `$schema` line
+ * existed) keeps its stale header forever — every freshly-written device doc gets
+ * the current header while the shared file is left behind (PHNX-3315).
+ *
+ * The header is healed TEXTUALLY, on the already-serialized string, rather than
+ * via `doc.commentBefore`: the `yaml` library folds the whole leading comment
+ * block onto the FIRST key's `commentBefore` when that key already carries a
+ * hand-written comment, so the header is not reliably the document comment — but
+ * it is always the top block of the output. Strip a leading `agents-cli metadata`
+ * header (any pre-rename variant, with or without the `$schema` line — the URL
+ * and schema lines are matched specifically so a hand-written body comment is
+ * never mistaken for a header line) and prepend the canonical header. A file with
+ * no recognizable header simply gains one. Body comments, which sit below the
+ * blank line that terminates the header, are untouched.
+ */
+function healMetaHeader(serialized: string): string {
+  const headerBlock =
+    /^# agents-cli metadata\n# Auto-generated - do not edit manually\n(?:# (?:https:\/\/github\.com\/phnx-labs\/[^\n]*|yaml-language-server: \$schema=[^\n]*)\n)*\n?/;
+  const stripped = serialized.replace(headerBlock, '');
+  // No metadata header present (replace was a no-op) → leave the file exactly as
+  // it is. We heal a STALE header; we never prepend one to a file that never had
+  // it (that would rewrite a hand-authored, headerless central file on the first
+  // real central change). A current header round-trips to the identical bytes.
+  return stripped === serialized ? serialized : META_HEADER + stripped;
+}
+
+/**
  * Serialize the central (synced) meta to `agents.yaml` WITHOUT destroying the
  * hand-written comments in the committed file.
  *
@@ -1069,19 +1100,35 @@ function serializeCentral(central: Record<string, unknown>): string {
     }
   }
   // No central field changed → keep the file byte-identical (comments intact), so
-  // writeIfChanged skips it and the churn loop never starts.
+  // writeIfChanged skips it and the churn loop never starts. A device-only write
+  // (pins/routines/etc. routed elsewhere) reaches here with changed=false and
+  // MUST NOT rewrite the shared file — header healing waits for a genuine central
+  // change below rather than dirtying agents.yaml on an unrelated write, which is
+  // the very churn that wedges `agents sync` and blocks fleet pulls.
   if (!changed) return existing;
-  // Everything cleared → header only (never leave a flow `{}` behind).
-  // Otherwise stringifyDoc: it still normalizes a legacy flow root (`{}`) to
-  // block, so edited nodes do not render flow (`disabledCommands: [ teams ]`
-  // instead of a `- teams` block list), but it no longer forces block on a
-  // normal document — that flattened committed flow sequences and made this
-  // writer disagree with feed.ts/activity.ts/migrate.ts on the same file
-  // (RUSH-2505). parseDocument still preserves comments + key ordering.
-  return isEmpty ? META_HEADER : stringifyDoc(doc);
+  // Everything cleared → header only (never leave a flow `{}` behind). Byte-stable
+  // when the file is already exactly the current header.
+  if (isEmpty) return existing === META_HEADER ? existing : META_HEADER;
+  // A central key changed: serialize the edited doc and heal a frozen header on
+  // the result. stringifyDoc still normalizes a legacy flow root (`{}`) to block,
+  // so edited nodes do not render flow (`disabledCommands: [ teams ]` instead of a
+  // `- teams` block list), but it no longer forces block on a normal document —
+  // that flattened committed flow sequences and made this writer disagree with
+  // feed.ts/activity.ts/migrate.ts on the same file (RUSH-2505). parseDocument
+  // still preserves body comments + key ordering; healMetaHeader is a no-op unless
+  // a stale metadata header is actually present, so a headerless central file is
+  // updated in place without gaining one.
+  return healMetaHeader(stringifyDoc(doc));
 }
 
-function writeMetaUnlocked(meta: Meta): void {
+/**
+ * Write `meta` to disk (central + device docs + pins) WITHOUT taking the meta
+ * lock — the caller must already hold it via {@link withMetaLock}. Exported so a
+ * writer that needs to read fresh state, decide, and commit within a SINGLE lock
+ * acquisition (e.g. browser tombstone eviction) can do so without the
+ * read-snapshot-then-separately-lock race that {@link updateMeta} would impose.
+ */
+export function writeMetaUnlocked(meta: Meta): void {
   const { agents, isolatedAgents, versions, deviceRoutines, deviceConfig, deviceBrowser, projectRoot, ...central } = meta;
 
   // Write the machine-local files FIRST, then strip central — so a crash mid-write

@@ -37,6 +37,8 @@ import chalk from 'chalk';
 import { resolveSyncPassphraseFromEnv } from '../lib/secrets/sync-passphrase.js';
 import { agentLabel, resolveAgentName, MANAGED_AGENT_IDS, isAgentHardDeprecated, hardDeprecationError } from '../lib/agents.js';
 import type { AgentId } from '../lib/types.js';
+import { autoEvictCentralBrowserProfiles } from '../lib/browser/registry.js';
+import { shouldAutoClaimCentralProfile } from '../lib/browser/profiles.js';
 import {
   isVersionInstalled,
   syncResourcesToVersion,
@@ -447,6 +449,13 @@ async function runInteractiveReconcile(
     } else outLog(chalk.yellow(`  ! ${repo}: ${(res.error ?? 'pull failed').split('\n')[0]}`));
   }
 
+  // Drain the legacy central `browser:` tombstone now that the repos are pulled.
+  // Running AFTER the pull is load-bearing: it acts on a view of central that
+  // already reflects peers' drains, so it never re-claims a profile another box
+  // already migrated (which would flip that profile's kind identity->fungible).
+  // The interactive path is always non-quiet, non-json.
+  evictCentralBrowserProfilesForSync(false, false, outLog, errLog);
+
   // 2. One selection spanning the chosen repos.
   const selection = mergeRepoScopedSelections(repos, cwd);
   const hasResources = selection.memory === 'all' || Object.entries(selection).some(
@@ -468,6 +477,45 @@ async function runInteractiveReconcile(
     printSyncDetail(result, agentId, version, cwd);
     if (result.hooks && hookCapable.has(agentId) && Object.keys(hookManifest).length > 0) {
       registerHooksToSettings(agentId, getVersionHomePath(agentId, version), hookManifest);
+    }
+  }
+}
+
+/**
+ * Drain the legacy central `browser:` tombstone during `agents sync` (PHNX-3315).
+ * New profiles write the per-device doc, but profiles created before the
+ * device-scoped store lingered in the shared top-level `agents.yaml` and churned
+ * every fleet pull until someone ran `agents browser profiles claim` by hand.
+ * Fold the ones THIS box can host into its device doc — host-gated, and the
+ * selection is computed under the meta lock (see autoEvictCentralBrowserProfiles)
+ * so it never races itself. Callers MUST invoke this AFTER the repo pull: acting
+ * on a pre-pull view of central risks re-claiming a profile a peer already
+ * drained, which would flip its kind identity->fungible. Non-fatal so a hiccup
+ * can never wedge the sync.
+ */
+function evictCentralBrowserProfilesForSync(
+  quiet: boolean,
+  json: boolean,
+  outLog: (msg: string) => void,
+  errLog: (msg: string) => void,
+): void {
+  try {
+    // Auto-claim ONLY remote (ssh://) tombstones — they are fungible by design,
+    // so a concurrent cross-machine double-claim is harmless. Local/cdp profiles
+    // have no per-machine ownership signal and are left central for an explicit
+    // `agents browser profiles claim` (PHNX-3315 review). See
+    // shouldAutoClaimCentralProfile.
+    const result = autoEvictCentralBrowserProfiles(shouldAutoClaimCentralProfile);
+    if (!quiet && !json && result.claimed.length > 0) {
+      outLog(
+        chalk.gray(
+          `  Claimed ${result.claimed.length} central browser profile(s) into this device: ${result.claimed.join(', ')}`,
+        ),
+      );
+    }
+  } catch (err) {
+    if (!quiet && !json) {
+      errLog(chalk.yellow(`  ! browser profile eviction skipped: ${(err as Error).message}`));
     }
   }
 }
@@ -520,6 +568,12 @@ async function runUmbrella(
       quiet: quiet || json,
       log: (msg) => { if (!quiet && !json) outLog(chalk.gray(`  ${msg}`)); },
     });
+
+    // Drain the legacy central `browser:` tombstone AFTER the umbrella pull, so
+    // we act on central as converged by this sync rather than a stale pre-pull
+    // copy that could re-claim a profile a peer already migrated. Skipped under
+    // --cloud (fetch-only, no local reconcile).
+    if (!opts.cloud) evictCentralBrowserProfilesForSync(quiet, json, outLog, errLog);
 
     if (json) {
       emitJson({
